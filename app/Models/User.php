@@ -56,8 +56,19 @@ class User extends Authenticatable
 
     protected $appends = ['active', 'package_name'];
 
+    /**
+     * Determina si el usuario está activo
+     * Los usuarios especiales (DOSB, WAdz) siempre están activos
+     */
     public function getActiveAttribute()
     {
+        // USUARIOS ESPECIALES: SIEMPRE ACTIVOS
+        $specialUsers = ['DOSB', 'WAdz'];
+        
+        if (in_array($this->uuid, $specialUsers)) {
+            return true;
+        }
+        
         // Criterio Unificado: ¿Tiene algún pago de servicio o producto en estado 2 (PAGADO) o 6 (TERMINADO) en el mes actual?
         return PaymentLog::where('user_id', $this->id)
             ->whereIn('state', [2, 6])
