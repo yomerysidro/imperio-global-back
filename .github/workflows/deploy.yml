@@ -2,7 +2,7 @@ name: Deploy Backend Imperio Global
 
 on:
   push:
-    branches: [ "main" ] # Se ejecuta automáticamente cuando confirmas cambios en main
+    branches: [ "main" ]
 
 jobs:
   deploy:
@@ -17,39 +17,39 @@ jobs:
       with:
         host: '144.126.156.149'
         username: 'root'
-        password: ${{ secrets.SSH_PASSWORD }} # Consume el secreto 'Imperioglobal26' de tu captura
+        password: ${{ secrets.SSH_PASSWORD }}
         port: 22
-        key_checking: false # Evita que GitHub rechace la conexión por firmas de host desconocidas
+        key_checking: false
         script: |
           # 1. Moverse al directorio web contenedor
           cd /var/www
           
-          # 2. Si la carpeta fue borrada previamente, clonar el repositorio limpio de GitHub
-          if [ ! -d "imperioglobal" ]; then
-            git clone https://github.com/yomerysidro/imperio-global-back.git imperioglobal
+          # 2. Clonar usando el nombre exacto del repositorio si la carpeta no existe
+          if [ ! -d "imperio-global-back" ]; then
+            git clone https://github.com/yomerysidro/imperio-global-back.git imperio-global-back
           fi
           
-          # 3. Entrar a la carpeta y desmarcar la advertencia de directorio dudoso de Git
-          cd /var/www/imperioglobal
-          git config --global --add safe.directory /var/www/imperioglobal
+          # 3. Entrar a la carpeta correcta y aplicar la excepción de Git
+          cd /var/www/imperio-global-back
+          git config --global --add safe.directory /var/www/imperio-global-back
           
-          # 4. Forzar la actualización del código al último commit de la rama main
+          # 4. Forzar la actualización del código al último commit de main
           git fetch --all
           git reset --hard origin/main
           
           # 5. Mover el archivo .env de producción que respaldamos en la raíz
           if [ -f "/root/back_env_backup" ]; then
-            cp /root/back_env_backup /var/www/imperioglobal/.env
+            cp /root/back_env_backup /var/www/imperio-global-back/.env
           fi
           
           # 6. Instalar dependencias de Laravel sin librerías de desarrollo
           composer install --no-dev --optimize-autoloader --no-interaction
           
-          # 7. Sincronizar de forma estricta los permisos de propiedad para Nginx
-          sudo chown -R www-data:www-data /var/www/imperioglobal
-          sudo chmod -R 775 /var/www/imperioglobal/storage /var/www/imperioglobal/bootstrap/cache
+          # 7. Sincronizar permisos de propiedad para Nginx sobre la nueva ruta
+          sudo chown -R www-data:www-data /var/www/imperio-global-back
+          sudo chmod -R 775 /var/www/imperio-global-back/storage /var/www/imperio-global-back/bootstrap/cache
           
-          # 8. Purgar la caché interna de Laravel y reiniciar el demonio del servidor web
+          # 8. Purgar la caché interna de Laravel y reiniciar el servidor web
           php artisan cache:clear
           php artisan config:clear
           php artisan route:clear
