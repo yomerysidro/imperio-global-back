@@ -212,7 +212,7 @@ class UserController extends BaseController
         $userModel->active = $isActive;
 
         // =========================================================
-        // 1. OBTENCIÓN DE DATOS TRANSACCIONALES
+        // 1. OBTENER TODOS LOS PUNTOS DEL MES FILTRADO
         // =========================================================
         $paymentOrderPoints = PaymentOrderPoint::where('state', true)
             ->whereMonth('created_at', $mesFiltro)
@@ -220,64 +220,54 @@ class UserController extends BaseController
             ->get();
 
         // =========================================================
-        // 2. OBTENER DATOS HISTÓRICOS Y UNIFICAR
+        // 2. CALCULAR PUNTOS DEL USUARIO ACTUAL (FILTRADOS)
         // =========================================================
-        $legacyTokens = GuestsTokenUser::where('state', true)->get();
-
-        $legacyPoints = $legacyTokens->map(function ($token) {
-            return (object) [
-                'id' => $token->id,
-                'user_code' => $token->guest_user_code,
-                'sponsor_code' => $token->sponsor_user_code,
-                'type' => 'COMPRA',
-                'point' => 0,
-                'state' => true,
-                'payment_order_id' => 'LEGACY-' . $token->id,
-                'user_id' => null,
-                'created_at' => $token->created_at,
-                'is_legacy' => true,
-                'pack_id' => null,
-                'payment' => 1
-            ];
-        });
-
-        // Unificar: convertir a arrays y mergear
-        $transactionalArray = $paymentOrderPoints->toArray();
-        $legacyArray = $legacyPoints->toArray();
-        $unifiedArray = array_merge($transactionalArray, $legacyArray);
-
-        // Convertir a colección de objetos stdClass
-        $unifiedPaymentOrderPoints = collect();
-        foreach ($unifiedArray as $item) {
-            $obj = new \stdClass();
-            foreach ($item as $key => $value) {
-                $obj->$key = $value;
-            }
-            $unifiedPaymentOrderPoints->push($obj);
-        }
+        $paymentOrderPointsUser = $paymentOrderPoints->filter(function ($point) use ($userModel) {
+            return strtoupper($point->user_code) === strtoupper($userModel->uuid);
+        })->values();
 
         // =========================================================
-        // 3. CALCULAR PUNTOS CON DATOS UNIFICADOS
+        // 3. CALCULAR PUNTOS POR TIPO
         // =========================================================
-        $paymentProductOrderPoints = PaymentProductOrderPoint::where("user_id", $user_id)->where("state", true)
-            ->whereMonth('created_at', $mesFiltro)->whereYear('created_at', $anioFiltro)->get();
+        // Puntos personales (COMPRA)
+        $puntosPersonales = $paymentOrderPointsUser
+            ->where('type', PaymentOrderPoint::COMPRA)
+            ->sum('point');
 
-        $userModel->points = $this->calculator->points($userModel->uuid, $unifiedPaymentOrderPoints, $paymentProductOrderPoints);
-        $userModel->totalPoints = $this->calculator->pointsTotal($userModel->uuid, $unifiedPaymentOrderPoints, $paymentProductOrderPoints);
+        // Puntos de red (GRUPAL)
+        $puntosRed = $paymentOrderPointsUser
+            ->where('type', PaymentOrderPoint::GRUPAL)
+            ->sum('point');
 
-        // Bono Histórico
-        $userModel->bonos_totales_historico = PaymentOrderPoint::where('sponsor_code', $userModel->uuid)
-            ->where('state', true)
-            ->whereIn('type', [PaymentOrderPoint::PATROCINIO, PaymentOrderPoint::PATROCINIO_SERVICIO, PaymentOrderPoint::RESIDUAL, PaymentOrderPoint::RESIDUAL_SERVICIO])
+        // Puntos residuales
+        $puntosResiduales = $paymentOrderPointsUser
+            ->where('type', PaymentOrderPoint::RESIDUAL)
+            ->sum('point');
+
+        // Ganancia por patrocinio (P y S) - NO se suma a totalPoints
+        $gananciaPatrocinio = $paymentOrderPointsUser
+            ->whereIn('type', ['P', 'S'])
+            ->sum('point');
+
+        // Puntos infinito
+        $puntosInfinito = $paymentOrderPointsUser
+            ->where('type', PaymentOrderPoint::INFINITO)
             ->sum('point');
 
         // =========================================================
-        // 4. CONTADORES DE DASHBOARD - CORREGIDO PARA TODOS LOS USUARIOS
+        // 4. 🔥 TOTAL DE PUNTOS = PERSONALES + RED + RESIDUALES (SIN PATROCINIO)
         // =========================================================
+        $totalPoints = $puntosPersonales + $puntosRed + $puntosResiduales;
 
-        // 🔥 Si es DOSB, obtener datos directamente de GuestsTokenUser
+        // =========================================================
+        // 5. OBTENER DATOS LEGACY
+        // =========================================================
+        $legacyTokens = GuestsTokenUser::where('state', true)->get();
+
+        // =========================================================
+        // 6. CONTADORES DE DASHBOARD
+        // =========================================================
         if (strtoupper($userModel->uuid) === 'DOSB') {
-            // DIRECTOS: Todos los invitados históricos de DOSB
             $directosLegacy = GuestsTokenUser::where('sponsor_user_code', $userModel->uuid)
                 ->where('state', true)
                 ->pluck('guest_user_code')
@@ -285,8 +275,6 @@ class UserController extends BaseController
 
             $userModel->directos = count($directosLegacy);
 
-            // ACTIVOS: Invitados que tienen pagos este mes
-            $now = Carbon::now();
             $activos = 0;
             foreach ($directosLegacy as $guestCode) {
                 $user = User::where('uuid', $guestCode)->first();
@@ -300,34 +288,25 @@ class UserController extends BaseController
                 }
             }
             $userModel->activos = $activos;
-
-            // RED TOTAL: Contar toda la red (recursivo)
             $userModel->red_total = $this->countTotalNetworkRecursive('DOSB');
-
-            // 🔥 CORRECCIÓN CRÍTICA: DOSB debe sumar TODOS los puntos de TODA su red (todos los tipos)
-            // Obtener TODOS los códigos de usuario de la red de DOSB
-            $networkUsers = $this->getAllNetworkUsers('DOSB');
             
-            $totalPointsRed = PaymentOrderPoint::where(function($q) use ($networkUsers) {
-                $q->whereIn('user_code', $networkUsers)
-                  ->orWhere('sponsor_code', 'DOSB');
-            })->where('state', true)->sum('point');
-
-            // Si no hay puntos en la red, usar el cálculo legacy como fallback
+            $networkUsers = $this->getAllNetworkUsers('DOSB');
+            $totalPointsRed = PaymentOrderPoint::whereIn('user_code', $networkUsers)
+                ->where('state', true)
+                ->sum('point');
+            
             if ($totalPointsRed > 0) {
-                $userModel->totalPoints = (int) $totalPointsRed;
+                $totalPoints = (int) $totalPointsRed;
             } else {
-                $puntosPorInvitado = 100;
-                $userModel->totalPoints = count($directosLegacy) * $puntosPorInvitado;
+                $totalPoints = count($directosLegacy) * 100;
             }
 
-            // Crear objeto de puntos para DOSB
             $userModel->points = (object) [
                 'patrocinio' => 0,
                 'residual' => 0,
-                'compra' => (object) ['total_puntos' => $userModel->totalPoints],
+                'compra' => (object) ['total_puntos' => $totalPoints],
                 'pointGroup' => 0,
-                'personal' => $userModel->totalPoints,
+                'personal' => $totalPoints,
                 'infinito' => 0,
                 'pointAfiliado' => 0,
                 'personalGlobal' => 0,
@@ -341,7 +320,7 @@ class UserController extends BaseController
             // 🔥 LÓGICA PARA USUARIOS NORMALES
             // =========================================================
 
-            // 1. DIRECTOS: Usuarios que tienen como sponsor a este usuario
+            // 1. DIRECTOS
             $directosPuntos = PaymentOrderPoint::where('sponsor_code', $userModel->uuid)
                 ->where('type', PaymentOrderPoint::COMPRA)
                 ->where('state', true)
@@ -357,7 +336,7 @@ class UserController extends BaseController
             $todosDirectos = array_unique(array_merge($directosPuntos, $directosLegacy));
             $userModel->directos = count($todosDirectos);
 
-            // 2. ACTIVOS: Directos que tienen pagos activos en el mes filtrado
+            // 2. ACTIVOS
             $activos = 0;
             foreach ($todosDirectos as $directCode) {
                 $user = User::where('uuid', $directCode)->first();
@@ -381,25 +360,48 @@ class UserController extends BaseController
             }
             $userModel->activos = $activos;
 
-            // 3. RED TOTAL: Contar toda la red recursivamente (sin límite de profundidad)
+            // 3. RED TOTAL
             $userModel->red_total = $this->countTotalNetworkRecursive($userModel->uuid);
+            
+            // 4. 🔥 OBJETO DE PUNTOS CORRECTO
+            $userModel->points = (object) [
+                'patrocinio' => $gananciaPatrocinio,        // Ganancia por patrocinio (BONO)
+                'residual' => $puntosResiduales,             // Puntos residuales
+                'compra' => (object) ['total_puntos' => $puntosPersonales], // Puntos personales
+                'pointGroup' => $puntosRed,                  // Puntos de red (grupales)
+                'personal' => $puntosPersonales,             // Puntos personales
+                'infinito' => $puntosInfinito,               // Puntos infinito
+                'pointAfiliado' => 0,
+                'personalGlobal' => 0,
+                'patrocinioRequest' => 0,
+                'patrocinioServicio' => 0,
+                'residualServicio' => 0,
+                // 🔥 NUEVOS CAMPOS PARA EL FRONTEND
+                'puntos_personales' => $puntosPersonales,
+                'puntos_red' => $puntosRed,
+                'ganancia_patrocinio' => $gananciaPatrocinio,
+                'total_general' => $totalPoints
+            ];
         }
 
+        // 🔥 CORRECCIÓN: totalPoints NO incluye patrocinio
+        $userModel->totalPoints = $totalPoints;
+
         // =========================================================
-        // 5. RANGOS
+        // 7. RANGOS
         // =========================================================
         $ranges = Range::where("state", true)->orderBy('points', 'asc')->get();
         $rangeCurrent = null;
 
         foreach ($ranges as $range) {
-            if ($range->points <= $userModel->totalPoints && $range->childs <= (int) $userModel->directos) {
+            if ($range->points <= $totalPoints && $range->childs <= (int) $userModel->directos) {
                 $rangeCurrent = $range;
             }
         }
 
         if (!$rangeCurrent) {
             $bronce = Range::where('points', 1000)->where('childs', 1)->where('state', true)->first();
-            if ($bronce && $userModel->totalPoints >= 1000 && $userModel->directos >= 1) {
+            if ($bronce && $totalPoints >= 1000 && $userModel->directos >= 1) {
                 $rangeCurrent = $bronce;
             }
         }
@@ -427,23 +429,36 @@ class UserController extends BaseController
         }
 
         // =========================================================
-        // 6. RESPUESTA
+        // 8. RESPUESTA CON user_detail
         // =========================================================
+        $userPoints = $paymentOrderPointsUser->values()->toArray();
+        
         $responsePayload = $userModel->toArray();
-        $responsePayload['points'] = $unifiedPaymentOrderPoints->toArray();
-        $responsePayload['legacy_count'] = $legacyPoints->count();
+        $responsePayload['points'] = $userPoints;
+        $responsePayload['legacy_count'] = $legacyTokens->count();
         $responsePayload['network_summary'] = [
-            'total_directs' => $userModel->directos,
-            'total_active' => $userModel->activos,
-            'total_network' => $userModel->red_total,
-            'has_legacy_network' => $legacyPoints->count() > 0
+            'total_directs' => $userModel->directos ?? 0,
+            'total_active' => $userModel->activos ?? 0,
+            'total_network' => $userModel->red_total ?? 0,
+            'has_legacy_network' => $legacyTokens->count() > 0
+        ];
+        
+        // 🔥 user_detail con datos separados para el frontend
+        $responsePayload['user_detail'] = [
+            'puntos_personales' => $puntosPersonales,
+            'puntos_red' => $puntosRed,
+            'ganancia_patrocinio' => $gananciaPatrocinio,
+            'puntos_residuales' => $puntosResiduales,
+            'total_puntos' => $totalPoints,
+            'paquete_actual' => $userModel->package_name ?? 'Sin paquete',
+            'rango_actual' => $rangeCurrent ? $rangeCurrent->title : 'Sin rango'
         ];
 
-        return $this->sendResponse((object)$responsePayload, 'Perfil sincronizado con datos históricos');
+        return $this->sendResponse((object)$responsePayload, 'Perfil sincronizado');
     } catch (Exception $e) {
         return $this->sendError("Fallo de integridad: " . $e->getMessage());
     }
-} 
+}
 
 
 /**
