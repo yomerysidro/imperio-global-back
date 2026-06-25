@@ -23,44 +23,54 @@ class PaymentOrderPointController extends BaseController
     {
         $this->calculator = new Calculator();
     }
- /**
-     * Get points for the authenticated user
+
+    /**
+     * Obtiene TODOS los puntos (P, R, G, B, etc.) del mes solicitado.
+     * con sus relaciones (user_point, payment_order, etc.).
+     * Esto es lo que espera el Frontend en finance.component.ts
+     * Ahora acepta el filtro por mes y año desde el Request.
      */
     public function points(Request $request)
     {
         try {
-            $user = auth()->user();
-            
-            if (!$user) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Usuario no autenticado'
-                ], 401);
+            $now = Carbon::now();
+
+            // Tomar los parámetros del request, o usar el mes actual por defecto
+            $month = $request->query('month', $now->month);
+            $year = $request->query('year', $now->year);
+
+            // Validación básica de parámetros
+            if (!is_numeric($month) || $month < 1 || $month > 12) {
+                $month = $now->month;
+            }
+            if (!is_numeric($year) || $year < 2000) {
+                $year = $now->year;
             }
 
-            // Aquí tu lógica para obtener los puntos
-            $data = [
-                'points' => 1150,
-                'groupPoints' => 0,
-                'totalPoints' => 1150,
-                'patrocinio' => 0,
-                'resudial' => 0,
-                'infinity' => 0,
-                // ... otros datos
-            ];
+            // --- OBTENER TODOS LOS PUNTOS DEL MES FILTRADO (SIN DATOS HISTÓRICOS) ---
+            $paymentOrderPoints = PaymentOrderPoint::with([
+                    'paymentOrder.paymentLog', 
+                    'userPoint.paymentActive'
+                ])
+                ->where('state', true)
+                ->whereMonth('created_at', $month)
+                ->whereYear('created_at', $year)
+                ->orderBy('created_at', 'desc')
+                ->get();
 
-            return response()->json([
-                'success' => true,
-                'data' => $data
-            ]);
-
-        } catch (\Exception $e) {
-            return response()->json([
-                'success' => false,
-                'message' => $e->getMessage()
-            ], 500);
+            // Devolvemos el array completo tal como lo espera el Frontend
+            // Si el mes no tiene datos, devolverá un array vacío y el front sumará 0.
+            return $this->sendResponse($paymentOrderPoints, 'Lista de puntos del ciclo seleccionado');
+        } catch (Exception $e) {
+            return $this->sendError($e->getMessage());
         }
     }
+
+    /**
+     * Get points for the authenticated user's tree (Dashboard particular)
+     * Esta función NO se usa para el módulo de Finanzas globales del Admin.
+     * Se mantiene intacta sin eliminar funcionalidades.
+     */
     public function pointsUser()
     {
         try {

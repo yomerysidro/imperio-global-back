@@ -443,7 +443,10 @@ class UserController extends BaseController
     } catch (Exception $e) {
         return $this->sendError("Fallo de integridad: " . $e->getMessage());
     }
-} /**
+} 
+
+
+/**
 * ============================================================
 * NUEVO MÉTODO: getAllNetworkUsers()
 * ============================================================
@@ -460,11 +463,12 @@ private function getAllNetworkUsers($userCode, &$visited = [])
 
    // 1. Hijos transaccionales (compras directas) - 🔥 SIN FILTRO DE PAYMENT
    $transactionalChildren = PaymentOrderPoint::where('sponsor_code', $userCode)
-       ->where('type', PaymentOrderPoint::COMPRA)
-       ->where('state', true)
-       // 🔥 ELIMINAMOS el filtro 'payment', 1
-       ->pluck('user_code')
-       ->toArray();
+    ->where('type', PaymentOrderPoint::COMPRA)
+    ->where('state', true)
+    // ← ELIMINAR where('payment', 1)
+    ->pluck('user_code')
+    ->unique()
+    ->toArray();
 
    // 2. Hijos históricos (invitados)
    $historicalChildren = GuestsTokenUser::where('sponsor_user_code', $userCode)
