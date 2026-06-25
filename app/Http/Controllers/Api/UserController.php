@@ -2275,7 +2275,6 @@ class UserController extends BaseController
             ->exists();
 
         // ✅ Determinar si debe generar bono de patrocinio
-        // Solo genera bono si el socio NO tenía un pack de esta categoría
         $debeGenerarBono = !$existingPackSameCategory;
 
         $currentSponsorCode   = $paymentOrder->sponsor_code;
@@ -2286,6 +2285,9 @@ class UserController extends BaseController
         $tipoPatrocinioParaEstePack = (strtoupper($packCurrent->category ?? '') === 'PRODUCTO')
             ? PaymentOrderPoint::PATROCINIO          // 'P'
             : PaymentOrderPoint::PATROCINIO_SERVICIO; // 'PS'
+
+        // 🛑 CORRECCIÓN CRÍTICA: Truncar a 1 solo carácter ('P' o 'S')
+        $tipoFinal = substr($tipoPatrocinioParaEstePack, 0, 1);
 
         while (!empty($currentSponsorCode) && $level <= 15) {
 
@@ -2354,7 +2356,7 @@ class UserController extends BaseController
             $superiorSponsorCode = $relation ? $relation->sponsor_code : '';
 
             // ══════════════════════════════════════════════════════
-            // A. PUNTOS GRUPALES (siempre se crean)
+            // A. PUNTOS GRUPALES (siempre se crean con 'G')
             // ══════════════════════════════════════════════════════
             $existingGrupal = PaymentOrderPoint::where('payment_order_id', $paymentOrder->id)
                 ->where('user_code', $currentSponsorCode)
@@ -2368,7 +2370,7 @@ class UserController extends BaseController
                     'sponsor_code'     => $superiorSponsorCode,
                     'point'            => $puntosBaseNuevoSocio,
                     'payment'          => 0,
-                    'type'             => PaymentOrderPoint::GRUPAL,
+                    'type'             => PaymentOrderPoint::GRUPAL, // 'G'
                     'user_id'          => $userCurrent->id,
                     'state'            => true,
                 ]);
@@ -2392,7 +2394,7 @@ class UserController extends BaseController
                             // Verificar si ya existe este bono para esta orden
                             $existingBonus = PaymentOrderPoint::where('payment_order_id', $paymentOrder->id)
                                 ->where('user_code', $currentSponsorCode)
-                                ->where('type', $tipoPatrocinioParaEstePack)
+                                ->where('type', $tipoFinal) // ✅ Usamos el tipo truncado
                                 ->first();
 
                             if (!$existingBonus) {
@@ -2402,7 +2404,7 @@ class UserController extends BaseController
                                     'sponsor_code'     => $superiorSponsorCode,
                                     'point'            => $montoDinero,
                                     'payment'          => 0,
-                                    'type'             => $tipoPatrocinioParaEstePack,
+                                    'type'             => $tipoFinal, // ✅ Se guarda 'P' o 'S' en lugar de 'PS'
                                     'user_id'          => $userCurrent->id,
                                     'state'            => true,
                                 ]);
