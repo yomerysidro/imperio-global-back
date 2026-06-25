@@ -136,302 +136,353 @@ class UserController extends BaseController
     }
 
     public function auth()
-    {
-        try {
-            $user_id = Auth::id();
-            $userModel = User::with(['file', 'range.range.file'])->select("*", "created_at as creatxlssed")->find($user_id);
+{
+    try {
+        $user_id = Auth::id();
+        $userModel = User::with(['file', 'range.range.file'])->select("*", "created_at as creatxlssed")->find($user_id);
 
-            if (!$userModel) return $this->sendError("Usuario no encontrado");
+        if (!$userModel) return $this->sendError("Usuario no encontrado");
 
-            // Lógica de Tiempo y Periodo de Gracia
-            $now = Carbon::now();
-            $currentMonth = $now->month;
-            $currentYear = $now->year;
-            $mesAnterior = $now->copy()->subMonth();
-            $isGracePeriod = $now->day <= 2;
+        // Lógica de Tiempo y Periodo de Gracia
+        $now = Carbon::now();
+        $currentMonth = $now->month;
+        $currentYear = $now->year;
+        $mesAnterior = $now->copy()->subMonth();
+        $isGracePeriod = $now->day <= 2;
 
-            $servicePayment = PaymentLog::with(['paymentOrder.pack'])
-                ->where("user_id", $user_id)->whereIn('state', [2, 6])->orderBy('created_at', 'desc')->first();
-            $productPayment = PaymentProductOrder::with(['pack', 'details.product'])
-                ->where("user_id", $user_id)->whereIn('state', [2, 3, 6])->orderBy('created_at', 'desc')->first();
+        $servicePayment = PaymentLog::with(['paymentOrder.pack'])
+            ->where("user_id", $user_id)->whereIn('state', [2, 6])->orderBy('created_at', 'desc')->first();
+        $productPayment = PaymentProductOrder::with(['pack', 'details.product'])
+            ->where("user_id", $user_id)->whereIn('state', [2, 3, 6])->orderBy('created_at', 'desc')->first();
 
-            $ultimoPago = collect([$servicePayment, $productPayment])->filter()->sortByDesc('created_at')->first();
+        $ultimoPago = collect([$servicePayment, $productPayment])->filter()->sortByDesc('created_at')->first();
 
-            $isActive = false;
-            $mesFiltro = $currentMonth;
-            $anioFiltro = $currentYear;
+        $isActive = false;
+        $mesFiltro = $currentMonth;
+        $anioFiltro = $currentYear;
 
-            if ($ultimoPago) {
-                $fechaPago = Carbon::parse($ultimoPago->created_at);
-                if ($fechaPago->month == $currentMonth && $fechaPago->year == $currentYear) {
-                    $isActive = true;
-                } elseif ($fechaPago->month == $mesAnterior->month && $fechaPago->year == $mesAnterior->year) {
-                    if ($isGracePeriod) {
-                        $isActive = true;
-                        $mesFiltro = $mesAnterior->month;
-                        $anioFiltro = $mesAnterior->year;
-                    }
-                }
-            }
-
-            // Administradores siempre activos
-            if ($userModel->is_admin) {
+        if ($ultimoPago) {
+            $fechaPago = Carbon::parse($ultimoPago->created_at);
+            if ($fechaPago->month == $currentMonth && $fechaPago->year == $currentYear) {
                 $isActive = true;
-                if ($servicePayment) {
-                    $servicePayment->state = PaymentLog::PAGADO;
-                }
-                if (!$ultimoPago) {
-                    $defaultPack = Pack::where('title', 'Pack Empresario')->first();
-                    if ($defaultPack) {
-                        $paymentOrder = PaymentOrder::create([
-                            'currency' => 'PEN',
-                            'amount' => 0,
-                            'sponsor_code' => $userModel->uuid,
-                            'pack_id' => $defaultPack->id,
-                            'token' => 'ADMIN-' . uniqid()
-                        ]);
-                        $ultimoPago = PaymentLog::create([
-                            'payment_order_id' => $paymentOrder->id,
-                            'user_id' => $user_id,
-                            'state' => PaymentLog::PAGADO,
-                            'confirm' => true,
-                            'message' => 'Admin activo por defecto'
-                        ]);
-                        $servicePayment = $ultimoPago;
-                    }
+            } elseif ($fechaPago->month == $mesAnterior->month && $fechaPago->year == $mesAnterior->year) {
+                if ($isGracePeriod) {
+                    $isActive = true;
+                    $mesFiltro = $mesAnterior->month;
+                    $anioFiltro = $mesAnterior->year;
                 }
             }
+        }
 
-            if (!$isActive && $ultimoPago) {
-                $ultimoPago->state = 6;
-                PaymentLog::where('id', $ultimoPago->id)->update(['state' => 6]);
+        // Administradores siempre activos
+        if ($userModel->is_admin) {
+            $isActive = true;
+            if ($servicePayment) {
+                $servicePayment->state = PaymentLog::PAGADO;
             }
-
-            $userModel->payment = $ultimoPago;
-            $userModel->package_name = $userModel->package_name;
-            $userModel->active = $isActive;
-
-            // =========================================================
-            // 1. OBTENCIÓN DE DATOS TRANSACCIONALES
-            // =========================================================
-            $paymentOrderPoints = PaymentOrderPoint::where('state', true)
-                ->whereMonth('created_at', $mesFiltro)
-                ->whereYear('created_at', $anioFiltro)
-                ->get();
-
-            // =========================================================
-            // 2. OBTENER DATOS HISTÓRICOS Y UNIFICAR
-            // =========================================================
-            $legacyTokens = GuestsTokenUser::where('state', true)->get();
-
-            $legacyPoints = $legacyTokens->map(function ($token) {
-                return (object) [
-                    'id' => $token->id,
-                    'user_code' => $token->guest_user_code,
-                    'sponsor_code' => $token->sponsor_user_code,
-                    'type' => 'COMPRA',
-                    'point' => 0,
-                    'state' => true,
-                    'payment_order_id' => 'LEGACY-' . $token->id,
-                    'user_id' => null,
-                    'created_at' => $token->created_at,
-                    'is_legacy' => true,
-                    'pack_id' => null,
-                    'payment' => 1
-                ];
-            });
-
-            // Unificar: convertir a arrays y mergear
-            $transactionalArray = $paymentOrderPoints->toArray();
-            $legacyArray = $legacyPoints->toArray();
-            $unifiedArray = array_merge($transactionalArray, $legacyArray);
-
-            // Convertir a colección de objetos stdClass
-            $unifiedPaymentOrderPoints = collect();
-            foreach ($unifiedArray as $item) {
-                $obj = new \stdClass();
-                foreach ($item as $key => $value) {
-                    $obj->$key = $value;
+            if (!$ultimoPago) {
+                $defaultPack = Pack::where('title', 'Pack Empresario')->first();
+                if ($defaultPack) {
+                    $paymentOrder = PaymentOrder::create([
+                        'currency' => 'PEN',
+                        'amount' => 0,
+                        'sponsor_code' => $userModel->uuid,
+                        'pack_id' => $defaultPack->id,
+                        'token' => 'ADMIN-' . uniqid()
+                    ]);
+                    $ultimoPago = PaymentLog::create([
+                        'payment_order_id' => $paymentOrder->id,
+                        'user_id' => $user_id,
+                        'state' => PaymentLog::PAGADO,
+                        'confirm' => true,
+                        'message' => 'Admin activo por defecto'
+                    ]);
+                    $servicePayment = $ultimoPago;
                 }
-                $unifiedPaymentOrderPoints->push($obj);
             }
+        }
 
-            // =========================================================
-            // 3. CALCULAR PUNTOS CON DATOS UNIFICADOS
-            // =========================================================
-            $paymentProductOrderPoints = PaymentProductOrderPoint::where("user_id", $user_id)->where("state", true)
-                ->whereMonth('created_at', $mesFiltro)->whereYear('created_at', $anioFiltro)->get();
+        if (!$isActive && $ultimoPago) {
+            $ultimoPago->state = 6;
+            PaymentLog::where('id', $ultimoPago->id)->update(['state' => 6]);
+        }
 
-            $userModel->points = $this->calculator->points($userModel->uuid, $unifiedPaymentOrderPoints, $paymentProductOrderPoints);
-            $userModel->totalPoints = $this->calculator->pointsTotal($userModel->uuid, $unifiedPaymentOrderPoints, $paymentProductOrderPoints);
+        $userModel->payment = $ultimoPago;
+        $userModel->package_name = $userModel->package_name;
+        $userModel->active = $isActive;
 
-            // Bono Histórico
-            $userModel->bonos_totales_historico = PaymentOrderPoint::where('sponsor_code', $userModel->uuid)
+        // =========================================================
+        // 1. OBTENCIÓN DE DATOS TRANSACCIONALES
+        // =========================================================
+        $paymentOrderPoints = PaymentOrderPoint::where('state', true)
+            ->whereMonth('created_at', $mesFiltro)
+            ->whereYear('created_at', $anioFiltro)
+            ->get();
+
+        // =========================================================
+        // 2. OBTENER DATOS HISTÓRICOS Y UNIFICAR
+        // =========================================================
+        $legacyTokens = GuestsTokenUser::where('state', true)->get();
+
+        $legacyPoints = $legacyTokens->map(function ($token) {
+            return (object) [
+                'id' => $token->id,
+                'user_code' => $token->guest_user_code,
+                'sponsor_code' => $token->sponsor_user_code,
+                'type' => 'COMPRA',
+                'point' => 0,
+                'state' => true,
+                'payment_order_id' => 'LEGACY-' . $token->id,
+                'user_id' => null,
+                'created_at' => $token->created_at,
+                'is_legacy' => true,
+                'pack_id' => null,
+                'payment' => 1
+            ];
+        });
+
+        // Unificar: convertir a arrays y mergear
+        $transactionalArray = $paymentOrderPoints->toArray();
+        $legacyArray = $legacyPoints->toArray();
+        $unifiedArray = array_merge($transactionalArray, $legacyArray);
+
+        // Convertir a colección de objetos stdClass
+        $unifiedPaymentOrderPoints = collect();
+        foreach ($unifiedArray as $item) {
+            $obj = new \stdClass();
+            foreach ($item as $key => $value) {
+                $obj->$key = $value;
+            }
+            $unifiedPaymentOrderPoints->push($obj);
+        }
+
+        // =========================================================
+        // 3. CALCULAR PUNTOS CON DATOS UNIFICADOS
+        // =========================================================
+        $paymentProductOrderPoints = PaymentProductOrderPoint::where("user_id", $user_id)->where("state", true)
+            ->whereMonth('created_at', $mesFiltro)->whereYear('created_at', $anioFiltro)->get();
+
+        $userModel->points = $this->calculator->points($userModel->uuid, $unifiedPaymentOrderPoints, $paymentProductOrderPoints);
+        $userModel->totalPoints = $this->calculator->pointsTotal($userModel->uuid, $unifiedPaymentOrderPoints, $paymentProductOrderPoints);
+
+        // Bono Histórico
+        $userModel->bonos_totales_historico = PaymentOrderPoint::where('sponsor_code', $userModel->uuid)
+            ->where('state', true)
+            ->whereIn('type', [PaymentOrderPoint::PATROCINIO, PaymentOrderPoint::PATROCINIO_SERVICIO, PaymentOrderPoint::RESIDUAL, PaymentOrderPoint::RESIDUAL_SERVICIO])
+            ->sum('point');
+
+        // =========================================================
+        // 4. CONTADORES DE DASHBOARD - CORREGIDO PARA TODOS LOS USUARIOS
+        // =========================================================
+
+        // 🔥 Si es DOSB, obtener datos directamente de GuestsTokenUser
+        if (strtoupper($userModel->uuid) === 'DOSB') {
+            // DIRECTOS: Todos los invitados históricos de DOSB
+            $directosLegacy = GuestsTokenUser::where('sponsor_user_code', $userModel->uuid)
                 ->where('state', true)
-                ->whereIn('type', [PaymentOrderPoint::PATROCINIO, PaymentOrderPoint::PATROCINIO_SERVICIO, PaymentOrderPoint::RESIDUAL, PaymentOrderPoint::RESIDUAL_SERVICIO])
-                ->sum('point');
+                ->pluck('guest_user_code')
+                ->toArray();
 
-            // =========================================================
-            // 4. CONTADORES DE DASHBOARD - CORREGIDO PARA DOSB
-            // =========================================================
+            $userModel->directos = count($directosLegacy);
 
-            // Si es DOSB, obtener datos directamente de GuestsTokenUser
-            if (strtoupper($userModel->uuid) === 'DOSB') {
-                // DIRECTOS: Todos los invitados históricos de DOSB
-                $directosLegacy = GuestsTokenUser::where('sponsor_user_code', $userModel->uuid)
-                    ->where('state', true)
-                    ->pluck('guest_user_code')
-                    ->toArray();
-
-                $userModel->directos = count($directosLegacy);
-
-                // ACTIVOS: Invitados que tienen pagos este mes
-                $now = Carbon::now();
-                $activos = 0;
-                foreach ($directosLegacy as $guestCode) {
-                    $user = User::where('uuid', $guestCode)->first();
-                    if ($user) {
-                        $hasPayment = PaymentLog::where('user_id', $user->id)
-                            ->whereIn('state', [2, 6])
-                            ->whereMonth('created_at', $now->month)
-                            ->whereYear('created_at', $now->year)
-                            ->exists();
-                        if ($hasPayment) $activos++;
-                    }
+            // ACTIVOS: Invitados que tienen pagos este mes
+            $now = Carbon::now();
+            $activos = 0;
+            foreach ($directosLegacy as $guestCode) {
+                $user = User::where('uuid', $guestCode)->first();
+                if ($user) {
+                    $hasPayment = PaymentLog::where('user_id', $user->id)
+                        ->whereIn('state', [2, 6])
+                        ->whereMonth('created_at', $now->month)
+                        ->whereYear('created_at', $now->year)
+                        ->exists();
+                    if ($hasPayment) $activos++;
                 }
-                $userModel->activos = $activos;
+            }
+            $userModel->activos = $activos;
 
-                // RED TOTAL: Contar toda la red (recursivo)
-                $userModel->red_total = $this->countTotalNetworkRecursive('DOSB');
+            // RED TOTAL: Contar toda la red (recursivo)
+            $userModel->red_total = $this->countTotalNetworkRecursive('DOSB');
 
-                // PUNTOS: Bonificación por invitados
+            // 🔥 CORRECCIÓN CRÍTICA: DOSB debe sumar TODOS los puntos de TODA su red (todos los tipos)
+            // Obtener TODOS los códigos de usuario de la red de DOSB
+            $networkUsers = $this->getAllNetworkUsers('DOSB');
+            
+            $totalPointsRed = PaymentOrderPoint::where(function($q) use ($networkUsers) {
+                $q->whereIn('user_code', $networkUsers)
+                  ->orWhere('sponsor_code', 'DOSB');
+            })->where('state', true)->sum('point');
+
+            // Si no hay puntos en la red, usar el cálculo legacy como fallback
+            if ($totalPointsRed > 0) {
+                $userModel->totalPoints = (int) $totalPointsRed;
+            } else {
                 $puntosPorInvitado = 100;
                 $userModel->totalPoints = count($directosLegacy) * $puntosPorInvitado;
+            }
 
-                // Crear objeto de puntos para DOSB
-                $userModel->points = (object) [
-                    'patrocinio' => 0,
-                    'residual' => 0,
-                    'compra' => (object) ['total_puntos' => count($directosLegacy) * $puntosPorInvitado],
-                    'pointGroup' => 0,
-                    'personal' => count($directosLegacy) * $puntosPorInvitado,
-                    'infinito' => 0,
-                    'pointAfiliado' => 0,
-                    'personalGlobal' => 0,
-                    'patrocinioRequest' => 0,
-                    'patrocinioServicio' => 0,
-                    'residualServicio' => 0,
-                    'legacy_bonus' => count($directosLegacy) * $puntosPorInvitado
-                ];
-            } else {
-                // Lógica normal para otros usuarios
-                $directosPuntos = PaymentOrderPoint::where('sponsor_code', $userModel->uuid)
-                    ->where('type', PaymentOrderPoint::COMPRA)
-                    ->where('payment', 1)
-                    ->whereMonth('created_at', $mesFiltro)
-                    ->whereYear('created_at', $anioFiltro)
-                    ->pluck('user_code')
-                    ->toArray();
+            // Crear objeto de puntos para DOSB
+            $userModel->points = (object) [
+                'patrocinio' => 0,
+                'residual' => 0,
+                'compra' => (object) ['total_puntos' => $userModel->totalPoints],
+                'pointGroup' => 0,
+                'personal' => $userModel->totalPoints,
+                'infinito' => 0,
+                'pointAfiliado' => 0,
+                'personalGlobal' => 0,
+                'patrocinioRequest' => 0,
+                'patrocinioServicio' => 0,
+                'residualServicio' => 0,
+                'legacy_bonus' => count($directosLegacy) * 100
+            ];
+        } else {
+            // =========================================================
+            // 🔥 LÓGICA PARA USUARIOS NORMALES
+            // =========================================================
 
-                $directosLegacy = GuestsTokenUser::where('sponsor_user_code', $userModel->uuid)
-                    ->where('state', true)
-                    ->pluck('guest_user_code')
-                    ->toArray();
+            // 1. DIRECTOS: Usuarios que tienen como sponsor a este usuario
+            $directosPuntos = PaymentOrderPoint::where('sponsor_code', $userModel->uuid)
+                ->where('type', PaymentOrderPoint::COMPRA)
+                ->where('state', true)
+                ->where('payment', 1)
+                ->pluck('user_code')
+                ->toArray();
 
-                $todosDirectos = array_unique(array_merge($directosPuntos, $directosLegacy));
-                $userModel->directos = count($todosDirectos);
+            $directosLegacy = GuestsTokenUser::where('sponsor_user_code', $userModel->uuid)
+                ->where('state', true)
+                ->pluck('guest_user_code')
+                ->toArray();
 
-                // ACTIVOS
-                $activeUserIds = User::whereIn('id', function ($query) use ($userModel, $mesFiltro, $anioFiltro) {
-                    $query->select('user_id')->from('payment_order_points')->where('sponsor_code', $userModel->uuid)
-                        ->where('type', PaymentOrderPoint::COMPRA)->where('payment', 1)
-                        ->whereMonth('created_at', $mesFiltro)->whereYear('created_at', $anioFiltro);
-                })->get()->filter(function ($u) use ($mesFiltro, $anioFiltro) {
-                    $hasActivePayment = PaymentLog::where('user_id', $u->id)
+            $todosDirectos = array_unique(array_merge($directosPuntos, $directosLegacy));
+            $userModel->directos = count($todosDirectos);
+
+            // 2. ACTIVOS: Directos que tienen pagos activos en el mes filtrado
+            $activos = 0;
+            foreach ($todosDirectos as $directCode) {
+                $user = User::where('uuid', $directCode)->first();
+                if ($user) {
+                    $hasActivePayment = PaymentLog::where('user_id', $user->id)
                         ->whereIn('state', [2, 6])
                         ->whereMonth('created_at', $mesFiltro)
                         ->whereYear('created_at', $anioFiltro)
                         ->exists();
-                    $hasActiveProduct = PaymentProductOrder::where('user_id', $u->id)
+                    
+                    $hasActiveProduct = PaymentProductOrder::where('user_id', $user->id)
                         ->whereIn('state', [2, 3, 6])
                         ->whereMonth('created_at', $mesFiltro)
                         ->whereYear('created_at', $anioFiltro)
                         ->exists();
-                    return $hasActivePayment || $hasActiveProduct;
-                })->pluck('id');
-
-                $userModel->activos = $activeUserIds->count();
-
-                // RED TOTAL
-                $redPuntosCount = PaymentOrderPoint::where('sponsor_code', $userModel->uuid)
-                    ->whereMonth('created_at', $mesFiltro)->whereYear('created_at', $anioFiltro)
-                    ->whereIn('type', [PaymentOrderPoint::GRUPAL, PaymentOrderPoint::PATROCINIO, PaymentOrderPoint::PATROCINIO_SERVICIO, PaymentOrderPoint::RESIDUAL, PaymentOrderPoint::RESIDUAL_SERVICIO])
-                    ->pluck('user_code')->unique()->count();
-
-                $redLegacyCount = GuestsTokenUser::where('sponsor_user_code', $userModel->uuid)->count();
-                $userModel->red_total = $redPuntosCount + $redLegacyCount;
-            }
-
-            // =========================================================
-            // 5. RANGOS
-            // =========================================================
-            $ranges = Range::where("state", true)->orderBy('points', 'asc')->get();
-            $rangeCurrent = null;
-
-            foreach ($ranges as $range) {
-                if ($range->points <= $userModel->totalPoints && $range->childs <= $userModel->directos) {
-                    $rangeCurrent = $range;
-                }
-            }
-
-            if (!$rangeCurrent) {
-                $bronce = Range::where('points', 1000)->where('childs', 1)->where('state', true)->first();
-                if ($bronce && $userModel->totalPoints >= 1000 && $userModel->directos >= 1) {
-                    $rangeCurrent = $bronce;
-                }
-            }
-
-            if ($rangeCurrent) {
-                $existingRange = RangeUser::where('user_id', $userModel->id)->where('status', true)->first();
-                if ($existingRange) {
-                    if ($existingRange->range_id != $rangeCurrent->id) {
-                        $existingRange->update(['range_id' => $rangeCurrent->id, 'updated_at' => now()]);
+                    
+                    if ($hasActivePayment || $hasActiveProduct) {
+                        $activos++;
                     }
-                    $userModel->range = (object) ['range' => $rangeCurrent];
-                } else {
-                    RangeUser::create([
-                        'user_id' => $userModel->id,
-                        'range_id' => $rangeCurrent->id,
-                        'status' => true,
-                        'created_at' => now(),
-                        'updated_at' => now()
-                    ]);
-                    $userModel->range = (object) ['range' => $rangeCurrent];
                 }
-            } else {
-                RangeUser::where('user_id', $userModel->id)->where('status', true)->update(['status' => false]);
-                $userModel->range = null;
             }
+            $userModel->activos = $activos;
 
-            // =========================================================
-            // 6. RESPUESTA
-            // =========================================================
-            $responsePayload = $userModel->toArray();
-            $responsePayload['points'] = $unifiedPaymentOrderPoints->toArray();
-            $responsePayload['legacy_count'] = $legacyPoints->count();
-            $responsePayload['network_summary'] = [
-                'total_directs' => $userModel->directos,
-                'total_active' => $userModel->activos,
-                'total_network' => $userModel->red_total,
-                'has_legacy_network' => $legacyPoints->count() > 0
-            ];
-
-            return $this->sendResponse((object)$responsePayload, 'Perfil sincronizado con datos históricos');
-        } catch (Exception $e) {
-            return $this->sendError("Fallo de integridad: " . $e->getMessage());
+            // 3. RED TOTAL: Contar toda la red recursivamente (sin límite de profundidad)
+            $userModel->red_total = $this->countTotalNetworkRecursive($userModel->uuid);
         }
-    }
 
+        // =========================================================
+        // 5. RANGOS
+        // =========================================================
+        $ranges = Range::where("state", true)->orderBy('points', 'asc')->get();
+        $rangeCurrent = null;
+
+        foreach ($ranges as $range) {
+            if ($range->points <= $userModel->totalPoints && $range->childs <= (int) $userModel->directos) {
+                $rangeCurrent = $range;
+            }
+        }
+
+        if (!$rangeCurrent) {
+            $bronce = Range::where('points', 1000)->where('childs', 1)->where('state', true)->first();
+            if ($bronce && $userModel->totalPoints >= 1000 && $userModel->directos >= 1) {
+                $rangeCurrent = $bronce;
+            }
+        }
+
+        if ($rangeCurrent) {
+            $existingRange = RangeUser::where('user_id', $userModel->id)->where('status', true)->first();
+            if ($existingRange) {
+                if ($existingRange->range_id != $rangeCurrent->id) {
+                    $existingRange->update(['range_id' => $rangeCurrent->id, 'updated_at' => now()]);
+                }
+                $userModel->range = (object) ['range' => $rangeCurrent];
+            } else {
+                RangeUser::create([
+                    'user_id' => $userModel->id,
+                    'range_id' => $rangeCurrent->id,
+                    'status' => true,
+                    'created_at' => now(),
+                    'updated_at' => now()
+                ]);
+                $userModel->range = (object) ['range' => $rangeCurrent];
+            }
+        } else {
+            RangeUser::where('user_id', $userModel->id)->where('status', true)->update(['status' => false]);
+            $userModel->range = null;
+        }
+
+        // =========================================================
+        // 6. RESPUESTA
+        // =========================================================
+        $responsePayload = $userModel->toArray();
+        $responsePayload['points'] = $unifiedPaymentOrderPoints->toArray();
+        $responsePayload['legacy_count'] = $legacyPoints->count();
+        $responsePayload['network_summary'] = [
+            'total_directs' => $userModel->directos,
+            'total_active' => $userModel->activos,
+            'total_network' => $userModel->red_total,
+            'has_legacy_network' => $legacyPoints->count() > 0
+        ];
+
+        return $this->sendResponse((object)$responsePayload, 'Perfil sincronizado con datos históricos');
+    } catch (Exception $e) {
+        return $this->sendError("Fallo de integridad: " . $e->getMessage());
+    }
+} /**
+* ============================================================
+* NUEVO MÉTODO: getAllNetworkUsers()
+* ============================================================
+* Obtiene recursivamente TODOS los códigos de usuario de la red
+*/
+private function getAllNetworkUsers($userCode, &$visited = [])
+{
+   if (in_array($userCode, $visited)) {
+       return [];
+   }
+   $visited[] = $userCode;
+
+   $users = [$userCode];
+
+   // 1. Hijos transaccionales (compras directas) - 🔥 SIN FILTRO DE PAYMENT
+   $transactionalChildren = PaymentOrderPoint::where('sponsor_code', $userCode)
+       ->where('type', PaymentOrderPoint::COMPRA)
+       ->where('state', true)
+       // 🔥 ELIMINAMOS el filtro 'payment', 1
+       ->pluck('user_code')
+       ->toArray();
+
+   // 2. Hijos históricos (invitados)
+   $historicalChildren = GuestsTokenUser::where('sponsor_user_code', $userCode)
+       ->where('state', true)
+       ->pluck('guest_user_code')
+       ->toArray();
+
+   // Unificar y evitar duplicados
+   $allChildren = array_unique(array_merge($transactionalChildren, $historicalChildren));
+
+   foreach ($allChildren as $child) {
+       // Recursivamente obtener todos los usuarios de la red
+       $childUsers = $this->getAllNetworkUsers($child, $visited);
+       $users = array_merge($users, $childUsers);
+   }
+
+   return array_unique($users);
+}
     public function authUpdate(Request $request)
     {
         $validator = Validator::make($request->all(), []);
