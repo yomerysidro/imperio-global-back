@@ -581,7 +581,11 @@ private function getAllNetworkUsers($userCode, &$visited = [])
                 }
             }
 
-            $userList = User::with(['file', 'range.range.file'])->where('is_admin', false);
+            // 🔥 Solo relaciones existentes
+            $userList = User::with([
+                'file', 
+                'range.range.file'
+            ])->where('is_admin', false);
 
             if ($request->has('code') && !empty($request->query('code'))) $userList = $userList->where("uuid", 'like', $request->query('code'));
             if ($request->has('email') && !empty($request->query('email'))) $userList = $userList->where("email", 'like', $request->query('email'));
@@ -608,18 +612,19 @@ private function getAllNetworkUsers($userCode, &$visited = [])
             $mesAnterior = $now->copy()->subMonth();
             $isGracePeriod = $now->day <= 2;
 
-            // Cargar TODOS los puntos del mes (para filtrado posterior)
-            $allPaymentOrderPoints = PaymentOrderPoint::with(['paymentOrder'])->where('state', true)
+            // 🔥 CORRECCIÓN CRÍTICA: Aquí es donde se cargan los DETALLES del paquete
+            $allPaymentOrderPoints = PaymentOrderPoint::with(['paymentOrder.pack']) // <-- AGREGADO .pack
+                ->where('state', true)
                 ->whereMonth('created_at', $currentMonth)->whereYear('created_at', $currentYear)
                 ->get();
-
 
             $allProductOrderPoints = PaymentProductOrderPoint::where("state", true)
                 ->whereMonth('created_at', $currentMonth)->whereYear('created_at', $currentYear)
                 ->get();
 
             // Puntos del mes anterior para periodo de gracia
-            $allPaymentOrderPointsLastMonth = PaymentOrderPoint::with(['paymentOrder'])->where('state', true)
+            $allPaymentOrderPointsLastMonth = PaymentOrderPoint::with(['paymentOrder.pack']) // <-- AGREGADO .pack
+                ->where('state', true)
                 ->whereMonth('created_at', $mesAnterior->month)->whereYear('created_at', $mesAnterior->year)
                 ->get();
 
@@ -636,6 +641,7 @@ private function getAllNetworkUsers($userCode, &$visited = [])
             foreach ($userList as $key => $user) {
                 $servicePayment = PaymentLog::with(['paymentOrder.pack', 'paymentOrder.sponsor.file'])
                     ->where("user_id", $user->id)->whereIn('state', [2, 6])->orderBy('created_at', 'desc')->first();
+                
                 $productPayment = PaymentProductOrder::with(['pack'])
                     ->where("user_id", $user->id)->whereIn('state', [2, 3, 6])->orderBy('created_at', 'desc')->first();
 
@@ -675,6 +681,7 @@ private function getAllNetworkUsers($userCode, &$visited = [])
                     return $point->user_id == $user->id;
                 })->values();
 
+                // 🔥 Esto genera el objeto points con los detalles de compra
                 $userList[$key]->points = $this->calculator->points($user->uuid, $popUsuario, $ppopUsuario);
                 $userList[$key]->totalPoints = $this->calculator->pointsTotal($user->uuid, $popUsuario, $ppopUsuario);
                 $userList[$key]->bonos_totales_historico = $historicalBonuses->get($user->uuid, 0);
