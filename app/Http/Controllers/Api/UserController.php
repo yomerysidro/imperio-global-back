@@ -581,7 +581,13 @@ private function getAllNetworkUsers($userCode, &$visited = [])
                 }
             }
 
-            $userList = User::with(['file', 'range.range.file'])->where('is_admin', false);
+            // 🔥 CORRECCIÓN: Se agregaron 'payment_services' y 'payment_product_orders' para que el modal pueda ver los servicios activos
+            $userList = User::with([
+                'file', 
+                'range.range.file',
+                'payment_services',           // 🔥 AGREGADO
+                'payment_product_orders'      // 🔥 AGREGADO
+            ])->where('is_admin', false);
 
             if ($request->has('code') && !empty($request->query('code'))) $userList = $userList->where("uuid", 'like', $request->query('code'));
             if ($request->has('email') && !empty($request->query('email'))) $userList = $userList->where("email", 'like', $request->query('email'));
@@ -636,6 +642,8 @@ private function getAllNetworkUsers($userCode, &$visited = [])
             foreach ($userList as $key => $user) {
                 $servicePayment = PaymentLog::with(['paymentOrder.pack', 'paymentOrder.sponsor.file'])
                     ->where("user_id", $user->id)->whereIn('state', [2, 6])->orderBy('created_at', 'desc')->first();
+                
+                // 🔥 AGREGADO: Se estaba usando $productPayment más abajo sin estar definida
                 $productPayment = PaymentProductOrder::with(['pack'])
                     ->where("user_id", $user->id)->whereIn('state', [2, 3, 6])->orderBy('created_at', 'desc')->first();
 
