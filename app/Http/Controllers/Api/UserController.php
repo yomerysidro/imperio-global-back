@@ -713,29 +713,41 @@ private function getAllNetworkUsers($userCode, &$visited = [])
                 ->latest()
                 ->value('sponsor_code');
 
-            // --- LÓGICA PARA AGREGAR PACKS ---
-            $processPackAdd = function ($packId) use ($userUpdated, $request, $currentSponsor) {
-                if (!$packId || $packId == 1 || $packId == "0") return;
+            // 3. Obtener los IDs enviados (Si viene 0 o null, lo tratamos como nulo)
+            $packId = ($request->has('packId') && $request->packId > 0) ? $request->packId : null;
+            $serviceId = ($request->has('serviceId') && $request->serviceId > 0) ? $request->serviceId : null;
+
+            // --- LÓGICA PARA AGREGAR PACKS (PRODUCTO O SERVICIO) ---
+            $processPackAdd = function ($packId, $categoryTarget) use ($userUpdated, $request, $currentSponsor) {
+                // Si no enviaron ID o es inválido, salimos sin error
+                if (!$packId) return;
 
                 $pack = Pack::find($packId);
                 if (!$pack) return;
 
-                // Verificar si el usuario ya tiene un pack de la MISMA CATEGORÍA
-                $existingPack = PaymentOrderPoint::where('user_code', $userUpdated->uuid)
+                // 🔥 CORRECCIÓN CRÍTICA: 
+                // Verificar si el usuario ya tiene un pack de la MISMA CATEGORÍA.
+                // Si ya tiene uno, lo reemplazamos (o actualizamos), no lo bloqueamos.
+                // Además, debemos eliminar el anterior para que no se dupliquen los puntos.
+                
+                $existingPackRecord = PaymentOrderPoint::where('user_code', $userUpdated->uuid)
                     ->where('type', PaymentOrderPoint::COMPRA)
                     ->where('state', true)
-                    ->whereHas('paymentOrder.pack', function ($q) use ($pack) {
-                        $q->where('category', $pack->category);
+                    ->whereHas('paymentOrder.pack', function ($q) use ($categoryTarget) {
+                        $q->where('category', $categoryTarget);
                     })
                     ->with('paymentOrder.pack')
                     ->first();
 
-                if ($existingPack) {
-                    $existingPackPoints = $existingPack->paymentOrder->pack->points ?? 0;
-                    $newPackPoints = $pack->points;
-
-                    if ($newPackPoints <= $existingPackPoints) {
-                        return;
+                // Si ya tiene un pack de esta categoría, lo desactivamos (para que el nuevo sea el vigente)
+                if ($existingPackRecord) {
+                    // No lo eliminamos, solo lo marcamos como inactivo para mantener historial
+                    $existingPackRecord->update(['state' => false]);
+                    
+                    // También podrías actualizar el PaymentLog asociado si es necesario
+                    if ($existingPackRecord->paymentOrder) {
+                        PaymentLog::where('payment_order_id', $existingPackRecord->payment_order_id)
+                            ->update(['state' => PaymentLog::TERMINADO]);
                     }
                 }
 
@@ -761,9 +773,10 @@ private function getAllNetworkUsers($userCode, &$visited = [])
                 $this->confirmPoint($newOrder, $userUpdated, $pack);
             };
 
-            // Ejecutar para producto y servicio
-            if ($request->has('packId')) $processPackAdd($request->packId);
-            if ($request->has('serviceId')) $processPackAdd($request->serviceId);
+            // Ejecutar para producto (si se envió) y para servicio (si se envió)
+            // Ahora permite que se ejecute solo 1 o ambos, sin bloquearse mutuamente
+            $processPackAdd($packId, 'Producto');
+            $processPackAdd($serviceId, 'Servicio');
 
             DB::commit();
             return $this->sendResponse(true, 'Usuario actualizado. Los puntos han subido a la red de patrocinio.');
