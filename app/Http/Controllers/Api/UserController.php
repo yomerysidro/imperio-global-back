@@ -9,7 +9,7 @@ use App\Http\Controllers\BaseController as BaseController;
 use App\Models\User;
 use Exception;
 use Illuminate\Support\Facades\Validator;
-use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\DB;exportExcelFinance
 use App\Models\File;
 use Illuminate\Support\Facades\Storage;
 use App\Models\PaymentLog;
@@ -1637,135 +1637,71 @@ private function getAllNetworkUsers($userCode, &$visited = [])
     }
 
     public function exportExcelFinance(Request $request)
-    {
-        try {
+{
+    try {
+        $fechaActual = Carbon::now();
+        $oneMonthAgo = $fechaActual->copy()->subMonth();
 
-            $fechaActual = Carbon::now();
-
-            // Obtener mes y año
-            $mes = $fechaActual->translatedFormat('F'); // o 'F' para nombre del mes
-            $año = $fechaActual->format('Y');
-            $month = $fechaActual->format('m');
-
-            $oneMonthAgo = $fechaActual->subMonth();
-
-            $userAdmin = User::where("is_admin", true)->first();
-
-            $tempUser = UserEmailTemp::where("userId", $userAdmin->id)
-                ->where("month", $oneMonthAgo->format('m'))
-                ->where("year", $oneMonthAgo->format('Y'))->first();
-
-            $contentFile = Storage::get($tempUser->fileAttachment);
-
-            if ($tempUser == null) {
-                return $this->sendError("No se encontro ningun dato pasado");
-            }
-
-            $fecha = Carbon::now()->format('YmdHis');
-            $nameFile = "reporte_usuarios_{$fecha}.xlsx";
-
-            $base64 = base64_encode($contentFile);
-
-            return $this->sendResponse([
-                'filename' => $nameFile,
-                'mime' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                'base64' => $base64
-            ], '');
-
-            // $userList = User::with(['range.range'])->where("is_admin", false)->get();
-
-            // $paymentOrderPoints = PaymentOrderPoint::with(['paymentOrder'])->where('state' , true)->get();
-            // $jsonBody = array();
-            // foreach ($userList as $keyTemp => $_user){
-            //     if( $_user->is_admin ) continue;
-            //     $_user = (object) $_user;
-            //     $_user->payment = PaymentLog::with(['paymentOrder.pack' ])->where( "user_id" ,  $_user->id )
-            //     ->where( function ($query) {
-            //         $query->where('state' , PaymentLog::PAGADO)
-            //         ->orWhere('state' , PaymentLog::TERMINADO);
-            //     })
-            //     ->orderBy('created_at', 'desc')
-            //     ->first();
-
-            //     $paymentProductOrderPoints = PaymentProductOrderPoint::where("user_id" , $_user->id)->where("state" , true)->get();
-
-            //     $calculator = $this->calculator->points( $_user->uuid , $paymentOrderPoints , $paymentProductOrderPoints );
-            //     $calculatorPoint = $this->calculator->pointsTotal( $_user->uuid , $paymentOrderPoints , $paymentProductOrderPoints );
-
-            //     array_push( $jsonBody , (object) array(
-            //         "fullname" => $_user->name,
-            //         "email" => $_user->email,
-            //         "uuid" => $_user->uuid,
-            //         "pack" => $_user->payment?->paymentOrder?->pack?->title ?? "Sin Plan",
-            //         "status" => $_user->payment == null ? "--" : ( $_user->payment->state == PaymentLog::PAGADO ? "Activo" : "Inactivo" ),
-            //         "totalPoint" => $calculatorPoint,
-            //         "range" => $_user->range == null ? "Sin Rango" : $_user->range->range->title,
-            //         "points" => (object) array(
-            //             "patrocinio"    => $calculator->patrocinio,
-            //             "residual"      => $calculator->residual,
-            //             "compra"        => $calculator->compra,
-            //             "pointGroup"    => $calculator->pointGroup,
-            //             "personal"      => $calculator->personal,
-            //             "infinito"      => $calculator->infinito,
-            //             "pointAfiliado" => $calculator->pointAfiliado,
-            //             "personalGlobal" => $calculator->personalGlobal
-            //         ),
-            //     ) );
-            // }
-
-            // // crear archivo excel
-            // $excelBody = array();
-
-            // foreach ($jsonBody as $key => $json) {
-            //     array_push(
-            //         $excelBody,
-            //         array(
-            //             $json->fullname,
-            //             $json->uuid,
-            //             $json->status,
-            //             $json->pack,
-            //             $json->points?->pointAfiliado ?? 0,
-            //             $json->points?->patrocinio ?? 0,
-            //             $json->points?->residual ?? 0,
-            //             ( ($json->points?->pointAfiliado ?? 0) 
-            //                 + ($json->points?->patrocinio ?? 0) 
-            //                 + ($json->points?->residual ?? 0) 
-            //                 + ( ($json->points?->personal ?? 0) * 0.02 ) 
-            //             ),
-            //             $json->points?->compra ?? 0,
-            //             $json->points->personal ?? 0,
-            //             $json->points->infinito ?? 0,
-            //             $json->totalPoint,
-            //             $json->range
-            //         )
-            //     );
-            // }
-
-            // // 1. Guardar Excel
-            // $fecha = Carbon::now()->format('YmdHis');
-            // $nameFile = "reporte_usuarios_{$fecha}.xlsx";
-            // $nameFilePath = "exports/".$nameFile;
-
-            // Excel::store(new ReportExcelUsers($excelBody), $nameFilePath , null, \Maatwebsite\Excel\Excel::XLSX);
-
-            // // Leer archivo y codificar en base64
-            // $fileContents = Storage::get($nameFilePath);
-            // $base64 = base64_encode($fileContents);
-
-            // // Eliminar el archivo después de codificar
-            // Storage::delete($nameFilePath);
-
-            // return $this->sendResponse( [
-            //     'filename' => $nameFile,
-            //     'mime' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-            //     'base64' => $base64
-            // ] , '');
-
-        } catch (Exception $e) {
-            DB::rollBack();
-            return $this->sendError($e->getMessage(), [], 402);
+        // Obtener el usuario administrador
+        $userAdmin = User::where("is_admin", true)->first();
+        if (!$userAdmin) {
+            return $this->sendError("No se encontró un usuario administrador", [], 404);
         }
+
+        // ✅ 1. Buscar el registro en UserEmailTemp del mes pasado
+        $tempUser = UserEmailTemp::where("userId", $userAdmin->id)
+            ->where("month", $oneMonthAgo->format('m'))
+            ->where("year", $oneMonthAgo->format('Y'))
+            ->first();
+
+        // ✅ 2. Validar existencia del registro
+        if (!$tempUser) {
+            return $this->sendError(
+                "No se encontró ningún registro del mes pasado (" . $oneMonthAgo->translatedFormat('F Y') . ")",
+                [],
+                404
+            );
+        }
+
+        // ✅ 3. Validar que tenga fileAttachment
+        if (empty($tempUser->fileAttachment)) {
+            return $this->sendError(
+                "El registro no tiene un archivo adjunto asociado",
+                [],
+                404
+            );
+        }
+
+        // ✅ 4. Verificar que el archivo exista físicamente en storage
+        if (!Storage::exists($tempUser->fileAttachment)) {
+            return $this->sendError(
+                "El archivo '{$tempUser->fileAttachment}' no existe en el servidor",
+                [],
+                404
+            );
+        }
+
+        // ✅ 5. Leer el contenido del archivo
+        $contentFile = Storage::get($tempUser->fileAttachment);
+
+        // ✅ 6. Generar nombre de archivo para la descarga
+        $fecha = Carbon::now()->format('YmdHis');
+        $nameFile = "reporte_usuarios_{$fecha}.xlsx";
+
+        // ✅ 7. Codificar en base64 para enviar al frontend
+        $base64 = base64_encode($contentFile);
+
+        return $this->sendResponse([
+            'filename' => $nameFile,
+            'mime' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            'base64' => $base64
+        ], 'Reporte generado correctamente');
+
+    } catch (Exception $e) {
+        // ❌ ELIMINADO: DB::rollBack() porque no hay transacción
+        return $this->sendError($e->getMessage(), [], 402);
     }
+}
 
     public function exportPdfProfile(Request $request)
     {
