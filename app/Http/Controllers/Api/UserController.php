@@ -1,7 +1,6 @@
 <?php
 
 namespace App\Http\Controllers\Api;
-
 use App\Http\Controllers\Controller;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
@@ -9,7 +8,7 @@ use App\Http\Controllers\BaseController as BaseController;
 use App\Models\User;
 use Exception;
 use Illuminate\Support\Facades\Validator;
-use Illuminate\Support\Facades\DB;exportExcelFinance
+use Illuminate\Support\Facades\DB;
 use App\Models\File;
 use Illuminate\Support\Facades\Storage;
 use App\Models\PaymentLog;
@@ -34,21 +33,15 @@ use App\Exports\UsersPointExport;
 use App\Mail\UsersPointExcel;
 use App\Mail\UserPointActive;
 use App\Models\PaymentProductOrderDetail;
-
 use App\Models\InviteUser;
 use App\Models\GuestsTokenUser;
 use App\Models\AfiliadosPoint;
-
 use Illuminate\Support\Facades\Mail;
 use App\Models\UserEmailTemp;
-
 use App\Exports\ReportExcelUsers;
 use Barryvdh\DomPDF\Facade\Pdf;
-
 use Carbon\Carbon;
 use Illuminate\Support\Str;
-
-
 use App\Mail\InivitedSponsorUser;
 use App\Services\Core\CodeGenerator;
 use App\Models\VerificationCodeUser;
