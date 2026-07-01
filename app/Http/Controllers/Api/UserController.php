@@ -1635,53 +1635,36 @@ private function getAllNetworkUsers($userCode, &$visited = [])
         $fechaActual = Carbon::now();
         $oneMonthAgo = $fechaActual->copy()->subMonth();
 
-        // Obtener el usuario administrador
         $userAdmin = User::where("is_admin", true)->first();
         if (!$userAdmin) {
             return $this->sendError("No se encontró un usuario administrador", [], 404);
         }
 
-        // ✅ 1. Buscar el registro en UserEmailTemp del mes pasado
+        // ✅ Buscar registro existente
         $tempUser = UserEmailTemp::where("userId", $userAdmin->id)
             ->where("month", $oneMonthAgo->format('m'))
             ->where("year", $oneMonthAgo->format('Y'))
             ->first();
 
-        // ✅ 2. Validar existencia del registro
+        // ✅ Si NO hay registro, generamos el reporte en tiempo real
         if (!$tempUser) {
-            return $this->sendError(
-                "No se encontró ningún registro del mes pasado (" . $oneMonthAgo->translatedFormat('F Y') . ")",
-                [],
-                404
-            );
+            return $this->generateExcelReportRealTime($oneMonthAgo);
         }
 
-        // ✅ 3. Validar que tenga fileAttachment
+        // Si existe, continuar con la lógica normal...
         if (empty($tempUser->fileAttachment)) {
-            return $this->sendError(
-                "El registro no tiene un archivo adjunto asociado",
-                [],
-                404
-            );
+            return $this->sendError("El registro no tiene un archivo adjunto asociado", [], 404);
         }
 
-        // ✅ 4. Verificar que el archivo exista físicamente en storage
         if (!Storage::exists($tempUser->fileAttachment)) {
-            return $this->sendError(
-                "El archivo '{$tempUser->fileAttachment}' no existe en el servidor",
-                [],
-                404
-            );
+            return $this->sendError("El archivo no existe en el servidor", [], 404);
         }
 
-        // ✅ 5. Leer el contenido del archivo
         $contentFile = Storage::get($tempUser->fileAttachment);
 
-        // ✅ 6. Generar nombre de archivo para la descarga
         $fecha = Carbon::now()->format('YmdHis');
         $nameFile = "reporte_usuarios_{$fecha}.xlsx";
 
-        // ✅ 7. Codificar en base64 para enviar al frontend
         $base64 = base64_encode($contentFile);
 
         return $this->sendResponse([
@@ -1691,9 +1674,90 @@ private function getAllNetworkUsers($userCode, &$visited = [])
         ], 'Reporte generado correctamente');
 
     } catch (Exception $e) {
-        // ❌ ELIMINADO: DB::rollBack() porque no hay transacción
         return $this->sendError($e->getMessage(), [], 402);
     }
+}
+
+// 🔥 NUEVO MÉTODO PARA GENERAR EN TIEMPO REAL
+private function generateExcelReportRealTime($date)
+{
+    $month = $date->format('m');
+    $year = $date->format('Y');
+
+    // Obtener todos los usuarios no admin
+    $userList = User::where("is_admin", false)->get();
+
+    $paymentOrderPoints = PaymentOrderPoint::where('state', true)->get();
+    $paymentProductOrderPoints = PaymentProductOrderPoint::where("state", true)->get();
+    $ranges = Range::where("state", true)->orderBy('points', 'asc')->get();
+
+    $excelBody = [];
+
+    foreach ($userList as $user) {
+        $payment = PaymentLog::with(['paymentOrder.pack'])
+            ->where("user_id", $user->id)
+            ->whereIn('state', [PaymentLog::PAGADO, PaymentLog::TERMINADO])
+            ->orderBy('created_at', 'desc')
+            ->first();
+
+        $calculator = $this->calculator->points(
+            $user->uuid,
+            $paymentOrderPoints,
+            $paymentProductOrderPoints->where('user_id', $user->id)
+        );
+
+        $totalPoints = $calculator->patrocinio + $calculator->residual + $calculator->compra->total_puntos + $calculator->pointGroup + $calculator->personal;
+
+        // Calcular rango
+        $rangeCurrent = null;
+        $directs = PaymentOrderPoint::where('sponsor_code', $user->uuid)
+            ->where('type', PaymentOrderPoint::COMPRA)
+            ->where('state', true)
+            ->where('payment', 1)
+            ->count();
+
+        foreach ($ranges as $range) {
+            if ($range->points <= $totalPoints && $range->childs <= $directs) {
+                $rangeCurrent = $range;
+                break;
+            }
+        }
+
+        $excelBody[] = [
+            $user->name,
+            $user->uuid,
+            $payment ? ($payment->state == PaymentLog::PAGADO ? "Activo" : "Inactivo") : "Sin plan",
+            $payment?->paymentOrder?->pack?->title ?? "Sin plan",
+            $calculator->pointAfiliado ?? 0,
+            $calculator->patrocinio ?? 0,
+            $calculator->residual ?? 0,
+            ($calculator->pointAfiliado ?? 0) + ($calculator->patrocinio ?? 0) + ($calculator->residual ?? 0) + (($calculator->personal ?? 0) * 0.02),
+            $calculator->compra->total_puntos ?? 0,
+            $calculator->personal ?? 0,
+            $calculator->infinito ?? 0,
+            $totalPoints,
+            $rangeCurrent?->title ?? "Sin rango"
+        ];
+    }
+
+    // Crear archivo Excel
+    $fecha = Carbon::now()->format('YmdHis');
+    $nameFile = "reporte_usuarios_{$fecha}.xlsx";
+    $nameFilePath = "exports/" . $nameFile;
+
+    Excel::store(new ReportExcelUsers($excelBody), $nameFilePath, null, \Maatwebsite\Excel\Excel::XLSX);
+
+    $fileContents = Storage::get($nameFilePath);
+    $base64 = base64_encode($fileContents);
+
+    // Opcional: eliminar archivo después de enviarlo
+    Storage::delete($nameFilePath);
+
+    return $this->sendResponse([
+        'filename' => $nameFile,
+        'mime' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'base64' => $base64
+    ], 'Reporte generado en tiempo real');
 }
 
     public function exportPdfProfile(Request $request)
