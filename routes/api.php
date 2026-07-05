@@ -5,6 +5,7 @@ use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\Api\LoginController;
 use App\Http\Controllers\Api\PackController;
 use App\Http\Controllers\Api\UserController;
+use App\Http\Controllers\Api\FinanceController; // Importante
 use App\Http\Controllers\Api\PaymentOrderController;
 use App\Http\Controllers\Api\OptionController;
 use App\Http\Controllers\Api\PaymentOrderPointController;
@@ -38,36 +39,31 @@ Route::prefix('v1')->group(function () {
     // --- GRUPO PROTEGIDO ---
     Route::middleware('auth:api')->group(function () {
 
-        // --- BLOQUE USUARIOS ---
+        // --- BLOQUE USUARIOS Y FINANZAS ---
         Route::prefix('users')->group(function () {
-
             
+            // Rutas de UserController
             Route::get('find-all', [UserController::class, 'findAll']);
             Route::get('search', [UserController::class, 'search']);
-            Route::get('cash-flow', [UserController::class, 'cashFlowFilter']);
-            Route::get('payments/find-all', [UserController::class, 'paymentsAll']);
             Route::get('invited-user', [UserController::class, 'invitedUserCode']);
             Route::get('list-tree', [UserController::class, 'treeList']);
-
-            // Rutas de acción (POST/PUT)
             Route::post('modify', [UserController::class, 'modifyUser']);
-            Route::post('change-sponsor', [UserController::class, 'changeSponsor']);
-            Route::post('reset', [UserController::class, 'resetPoint']);
-            Route::post('reset-all', [UserController::class, 'resetAll']);
-            Route::post('reset-all-points', [UserController::class, 'resetAllPoint']);
-            Route::post('desactive', [UserController::class, 'desactive']);
-            Route::post('active-residual', [UserController::class, 'activeResidual']);
-            Route::post('reset-send-email', [UserController::class, 'resetUserToTemp']);
-            Route::post('pdf-finance', [UserController::class, 'exportPdfFinance']);
-            Route::post('excel-finance', [UserController::class, 'exportExcelFinance']);
-            Route::post('pdf-profile', [UserController::class, 'exportPdfProfile']);
             Route::post('create-user', [UserController::class, 'createUser']);
+            Route::get('{id}', [UserController::class, 'show'])->whereNumber('id');
 
-
-
-
-            // LA RUTA QUE ME PEDISTE (DE PRIMERA)
-            Route::get('{id}', [UserController::class, 'show'])->whereNumber('id');            // Rutas de búsqueda y listado
+            // Rutas derivadas a FinanceController (Se mantiene URL, cambia Controlador)
+            Route::get('cash-flow', [FinanceController::class, 'cashFlowFilter']);
+            Route::get('payments/find-all', [FinanceController::class, 'paymentsAll']);
+            Route::post('change-sponsor', [FinanceController::class, 'changeSponsor']);
+            Route::post('reset', [FinanceController::class, 'resetPoint']);
+            Route::post('reset-all', [FinanceController::class, 'resetAll']);
+            Route::post('reset-all-points', [FinanceController::class, 'resetAllPoint']);
+            Route::post('desactive', [FinanceController::class, 'desactive']);
+            Route::post('active-residual', [FinanceController::class, 'activeResidual']);
+            Route::post('reset-send-email', [FinanceController::class, 'resetUserToTemp']);
+            Route::post('pdf-finance', [FinanceController::class, 'exportPdfFinance']);
+            Route::post('excel-finance', [FinanceController::class, 'exportExcelFinance']);
+            Route::post('pdf-profile', [FinanceController::class, 'exportPdfProfile']);
 
             // Invitaciones
             Route::post('generate-invited', [UserController::class, 'invitedLink']);
