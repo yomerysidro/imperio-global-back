@@ -508,7 +508,8 @@ class PaymentOrderController extends BaseController
                 array("state" => PaymentLog::TERMINADO)
             );
 
-            PaymentOrderPoint::where("state", true)->update(
+            PaymentOrderPoint::where("state", true)
+                ->whereIn('type', [PaymentOrderPoint::COMPRA, PaymentOrderPoint::GRUPAL])->update(
                 array("state" => false)
             );
 
@@ -528,7 +529,8 @@ class PaymentOrderController extends BaseController
                 array("state" => PaymentLog::TERMINADO)
             );
 
-            PaymentOrderPoint::where("state", true)->where("user_code", $code)->update(
+            PaymentOrderPoint::where("state", true)->where("user_code", $code)
+                ->whereIn('type', [PaymentOrderPoint::COMPRA, PaymentOrderPoint::GRUPAL])->update(
                 array("state" => false)
             );
 

@@ -27,4 +27,9 @@ class Range extends Model
     {
         return $this->hasOne(File::class , 'id' , 'file');
     }
+
+    public function rule()
+    {
+        return $this->hasOne(RangeRule::class);
+    }
 }

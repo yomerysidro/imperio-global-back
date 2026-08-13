@@ -27,6 +27,7 @@ class PaymentOrderPoint extends Model
 
     protected $fillable = [
         'payment_order_id',
+        'manual_reactivation_id',
         'user_code',
         'sponsor_code',
         'source_user_code',

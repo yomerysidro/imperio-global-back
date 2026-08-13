@@ -3,18 +3,17 @@
 namespace App\Services\Core\Services;
 
 use App\Models\PaymentOrderPoint;
-use App\Models\SponsorshipPoint;
+use App\Models\CommissionRule;
+use App\Models\RangeRule;
 use App\Models\User;
 use App\Services\Core\NetworkTreeService;
 
 class ServiceTreeManager
 {
-    private const MAX_SPONSORSHIP_LEVEL = 5;
-    private const MAX_NETWORK_LEVEL = 15;
-
     public function distributePoints($userCode, $orderId, $points, $packId, $level = 1, &$visited = [])
     {
-        if ($level > self::MAX_NETWORK_LEVEL) return;
+        $maxNetworkLevel = (int) RangeRule::where('state', true)->max('depth_to');
+        if ($level > $maxNetworkLevel) return;
 
         $normalized = strtoupper($userCode);
         if (isset($visited[$normalized])) return;
@@ -27,9 +26,7 @@ class ServiceTreeManager
         $sponsor = User::where('uuid', $sponsorCode)->first();
         if (!$sponsor) return;
 
-        $commission = $level <= self::MAX_SPONSORSHIP_LEVEL
-            ? $this->calculateServicePoints($points, $level, $packId)
-            : 0;
+        $commission = $this->calculateServicePoints($points, $level, $packId);
         if ($commission > 0) {
             PaymentOrderPoint::firstOrCreate([
                 'payment_order_id' => $orderId,
@@ -65,8 +62,9 @@ class ServiceTreeManager
 
     private function calculateServicePoints($totalPoints, $level, $packId)
     {
-        $config = SponsorshipPoint::where('pack_id', $packId)->first();
-        $percent = (float) ($config?->{"level{$level}"} ?? 0);
+        $config = CommissionRule::where('bonus_type', CommissionRule::SPONSORSHIP)
+            ->where('pack_id', $packId)->where('level', $level)->where('state', true)->first();
+        $percent = (float) ($config?->percentage ?? 0);
 
         return (float) $totalPoints * $percent / 100;
     }

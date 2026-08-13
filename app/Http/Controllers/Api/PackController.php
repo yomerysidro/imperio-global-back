@@ -16,6 +16,7 @@ use Illuminate\Support\Facades\Storage;
 
 use App\Models\ResidualPoint;
 use App\Models\SponsorshipPoint;
+use App\Models\CommissionRule;
 class PackController extends BaseController
 {
     //
@@ -175,6 +176,10 @@ class PackController extends BaseController
                     'level7'    => $dataBody->level7,
                 ));
             }
+            foreach (range(1, 7) as $level) {
+                CommissionRule::where('bonus_type', CommissionRule::RESIDUAL)->where('level', $level)
+                    ->update(['percentage' => $dataBody->{'level'.$level}]);
+            }
 
             $residualPointList = ResidualPoint::all();
 
@@ -214,6 +219,11 @@ class PackController extends BaseController
                     'level4'    => $dataBody->level4,
                     'level5'    => $dataBody->level5,
                 ));
+            }
+            foreach (range(1, 5) as $level) {
+                CommissionRule::updateOrCreate([
+                    'bonus_type' => CommissionRule::SPONSORSHIP, 'pack_id' => $dataBody->pack_id, 'level' => $level,
+                ], ['percentage' => $dataBody->{'level'.$level}, 'state' => true]);
             }
 
             $SponsorshipPointList = SponsorshipPoint::with(['pack:id,title'])->get();

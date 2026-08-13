@@ -29,20 +29,18 @@
 
         <h3 >Finanzas Imperio</h3>
 
-        <h4 style="border-bottom: 1px solid #888888;">Resultados de Puntos Personales</h4>
+        <h4 style="border-bottom: 1px solid #888888;">Comisiones económicas generadas</h4>
 
-        <p>Puntos Patrocinio Totales de todos los Usuarios Activos = <b>{{ $patrocinioUserActive }}</b></p>
-        <p>Puntos Patrocinio Totales de todos los Usuarios Inactivos = <b>{{ $patrocinioUserInactive }}</b></p>
-        <p style="color: #000000;">Puntos Patrocinio totales de toda la red de Imperio: <b>{{ $patrocinioUserActive + $patrocinioUserInactive }}</b></p>
+        <p style="color: #000000;">Bonos de patrocinio válidos: <b>S/ {{ number_format($patrocinioUserActive, 2) }}</b></p>
         <div style="margin-bottom: 20px;"></div>
 
-        <p>Puntos Residuales Totales de todos los Usuarios Activos = <b>{{ $residualUserActive }}</b></p>
-        <p>Puntos Residuales Totales de todos los Usuarios Inactivos = <b>{{ $residualUserInactive }}</b></p>
-        <p style="color: #000000;">Puntos Residuales totales de toda la red de Imperio <b>{{ $residualUserActive + $residualUserInactive }}</b></p>
+        <p style="color: #000000;">Bonos residuales válidos: <b>S/ {{ number_format($residualUserActive, 2) }}</b></p>
         <div style="margin-bottom: 20px;"></div>
 
-        <p>Puntos Totales en toda la red de imperio  = <b style="color: #000000;">{{ $totalPoint }}</b></p>
-        <p>Suma de Bonos infinitos de todos los usuarios Activos: <b>{{ $infinityUser }}</b></p>
+        <p>Bono infinito: <b>S/ {{ number_format($infinityUser, 2) }}</b></p>
+        <p>Total de comisiones de la empresa: <b style="color: #000000;">S/ {{ number_format($totalPoint, 2) }}</b></p>
+        <p>Movimientos válidos: <b>{{ $ledger['movimientos_validos'] ?? 0 }}</b></p>
+        <p>Movimientos anulados: <b>{{ $ledger['movimientos_anulados'] ?? 0 }}</b></p>
 
     </div>
 </body>

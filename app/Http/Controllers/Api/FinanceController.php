@@ -26,6 +26,8 @@ use App\Models\Option;
 use App\Services\Core\PointCalculator;
 use App\Services\Core\NetworkTreeService;
 use App\Services\Core\CommissionService;
+use App\Services\Core\ActivationService;
+use App\Services\Core\FinancialLedgerService;
 use Maatwebsite\Excel\Facades\Excel;
 use App\Exports\ReportExcelUsers;
 use Barryvdh\DomPDF\Facade\Pdf;
@@ -37,6 +39,7 @@ use App\Mail\UserPointActive;
 use App\Http\Resources\PaginationCollection;
 use App\Models\GuestsTokenUser;
 use App\Models\SponsorRelation;
+use App\Models\ManualReactivation;
 use App\Services\Core\CommissionService as CoreCommissionService;
 
 class FinanceController extends BaseController
@@ -61,41 +64,20 @@ class FinanceController extends BaseController
             $year        = $oneMonthAgo->format('Y');
             $month       = $oneMonthAgo->format('m');
 
-            $paymentOrderPoints               = PaymentOrderPoint::with(['paymentOrder.paymentLog', 'userPoint.paymentActive'])
-                ->whereRaw('MONTH(created_at) = ?', [$month])->whereRaw('YEAR(created_at) = ?', [$year])
-                ->get();
-
-            $patrocinioUserActive   = 0;
-            $patrocinioUserInactive = 0;
-            $residualUserActive     = 0;
-            $residualUserInactive   = 0;
-            $infinityUser           = 0;
-            $totalPoint             = 0;
-
-            foreach ($paymentOrderPoints as $key => $paymentOrderPoint) {
-                if ($paymentOrderPoint->paymentOrder->paymentLog->state        == PaymentLog::PAGADO) {
-                    if (in_array($paymentOrderPoint->type, [PaymentOrderPoint::PATROCINIO, PaymentOrderPoint::PATROCINIO_SERVICIO, 'S'])) $patrocinioUserActive += $paymentOrderPoint->point;
-                    else if (in_array($paymentOrderPoint->type, [PaymentOrderPoint::RESIDUAL, PaymentOrderPoint::RESIDUAL_SERVICIO])) $residualUserActive += $paymentOrderPoint->point;
-                } else if ($paymentOrderPoint->paymentOrder->paymentLog->state == PaymentLog::TERMINADO) {
-                    if (in_array($paymentOrderPoint->type, [PaymentOrderPoint::PATROCINIO, PaymentOrderPoint::PATROCINIO_SERVICIO, 'S'])) $patrocinioUserInactive += $paymentOrderPoint->point;
-                    else if (in_array($paymentOrderPoint->type, [PaymentOrderPoint::RESIDUAL, PaymentOrderPoint::RESIDUAL_SERVICIO])) $residualUserInactive += $paymentOrderPoint->point;
-                }
-
-                if ($paymentOrderPoint->type == PaymentOrderPoint::INFINITO) $infinityUser += $paymentOrderPoint->point;
-                if (in_array($paymentOrderPoint->type, ['P', 'PS', 'S', 'R', 'RS', 'I'])) {
-                    $totalPoint += $paymentOrderPoint->point;
-                }
-            }
+            $from = Carbon::create((int) $year, (int) $month, 1)->startOfMonth();
+            $to = $from->copy()->endOfMonth();
+            $ledger = app(FinancialLedgerService::class)->summary($from, $to);
 
             $data = [
                 "mes"                    => $mes,
                 "year"                   => $year,
-                "patrocinioUserActive"   => $patrocinioUserActive,
-                "patrocinioUserInactive" => $patrocinioUserInactive,
-                "residualUserActive"     => $residualUserActive,
-                "residualUserInactive"   => $residualUserInactive,
-                "infinityUser"           => $infinityUser,
-                "totalPoint"             => $totalPoint
+                "patrocinioUserActive"   => $ledger['patrocinio'],
+                "patrocinioUserInactive" => 0,
+                "residualUserActive"     => $ledger['residual'],
+                "residualUserInactive"   => 0,
+                "infinityUser"           => $ledger['infinito'],
+                "totalPoint"             => $ledger['total_comisiones'],
+                "ledger"                 => $ledger,
             ];
 
             $pdf    = Pdf::loadView('pdf.finance', $data)->setPaper('a4', 'portrait');
@@ -208,7 +190,7 @@ class FinanceController extends BaseController
                 $calculator->pointAfiliado ?? 0,
                 $calculator->patrocinio ?? 0,
                 $calculator->residual ?? 0,
-                ($calculator->pointAfiliado ?? 0) + ($calculator->patrocinio ?? 0) + ($calculator->residual ?? 0) + (($calculator->personal ?? 0) * 0.02),
+                ($calculator->pointAfiliado ?? 0) + ($calculator->patrocinio ?? 0) + ($calculator->residual ?? 0) + ($calculator->infinito ?? 0),
                 $calculator->compra->total_puntos ?? 0,
                 $calculator->personal ?? 0,
                 $calculator->infinito ?? 0,
@@ -469,7 +451,7 @@ class FinanceController extends BaseController
                             (($json->points?->pointAfiliado ?? 0)
                                 + ($json->points?->patrocinio ?? 0)
                                 + ($json->points?->residual ?? 0)
-                                + (($json->points?->personal ?? 0) * 0.02)
+                                + ($json->points?->infinito ?? 0)
                             ),
                             $json->points?->compra ?? 0,
                             $json->points->personal ?? 0,
@@ -547,6 +529,7 @@ class FinanceController extends BaseController
                 ->update(["state" => PaymentLog::TERMINADO]);
 
             PaymentOrderPoint::where('state', true)
+                ->whereIn('type', [PaymentOrderPoint::COMPRA, PaymentOrderPoint::GRUPAL])
                 ->whereMonth('created_at', $fechaActual->month)
                 ->whereYear('created_at', $fechaActual->year)
                 ->update(["state" => false]);
@@ -623,7 +606,7 @@ class FinanceController extends BaseController
             'userCode'            => 'required',
             'products'            => 'required|array',
             'products.*.product'  => 'required|exists:products,id',
-            'products.*.quantity' => 'required|numeric'
+            'products.*.quantity' => 'required|integer|min:1'
         ]);
 
         if ($validator->fails()) return $this->sendError('Error de validacion.', $validator->errors(), 422);
@@ -633,19 +616,49 @@ class FinanceController extends BaseController
             DB::beginTransaction();
             $userModel = User::with(['file'])->find($user_id);
 
-            if (!$userModel->is_admin) return $this->sendError("No tiene permisos ese usuario");
+            if (!$userModel->is_admin) {
+                DB::rollBack();
+                return $this->sendError("No tiene permisos ese usuario");
+            }
 
             $dataBody    = (object) $request->all();
             $userUpdated = User::where("uuid", $dataBody->userCode)->first();
 
-            if ($userUpdated               == null) return $this->sendError("No se existe el usuario seleccionado");
-            if (count($dataBody->products) == 0) return $this->sendError("No se encuentra productos");
+            if ($userUpdated == null) {
+                DB::rollBack();
+                return $this->sendError("No se existe el usuario seleccionado");
+            }
+            if (count($dataBody->products) == 0) {
+                DB::rollBack();
+                return $this->sendError("No se encuentra productos");
+            }
+            if ($userUpdated->active) {
+                DB::rollBack();
+                return $this->sendError('El usuario ya se encuentra activo.', [], 422);
+            }
+            $eligibility = $this->reactivationEligibility($userUpdated);
+            if (!$eligibility['eligible']) {
+                DB::rollBack();
+                return $this->sendError($eligibility['message'], [
+                    'reason' => $eligibility['reason'],
+                    'eligible_from' => $eligibility['eligible_from'],
+                ], 422);
+            }
+            $this->reconcileManualReactivations($userUpdated);
+            if (ManualReactivation::where('user_id', $userUpdated->id)->where('state', ManualReactivation::ACTIVE)->exists()) {
+                DB::rollBack();
+                return $this->sendError('El usuario ya tiene una reactivacion manual activa.', [], 422);
+            }
 
-            $paymentLog = PaymentLog::with(['paymentOrder.pack'])
-                ->where("user_id",  $userUpdated->id)
-                ->whereIn("state", [PaymentLog::TERMINADO, PaymentLog::PAGADO])
-                ->orderBy('created_at', 'desc')
-                ->first();
+            $createdPaymentLogIds = [];
+            $createdPaymentOrderIds = [];
+
+            $pack = $this->productPack($userUpdated);
+            if (!$pack) {
+                DB::rollBack();
+                return $this->sendError('El usuario no tiene un paquete de productos para calcular la reactivacion.', [], 422);
+            }
+            $paymentLog = $this->productPackPaymentLog($userUpdated, $pack->id);
 
             $productIds = [];
             foreach ($dataBody->products as $key => $product) {
@@ -654,14 +667,16 @@ class FinanceController extends BaseController
             }
 
             $productList       = Product::whereIn('id', $productIds)->get();
+            if ($productList->count() !== count(array_unique($productIds))) {
+                DB::rollBack();
+                return $this->sendError('Uno o mas productos seleccionados no existen.', [], 422);
+            }
             $productListCreate = [];
             $totalAmount       = 0;
             $totalPoints       = 0;
             $discount          = 0;
 
-            if ($paymentLog != null && $paymentLog->paymentOrder && $paymentLog->paymentOrder->pack) {
-                $discount     = floatval($paymentLog->paymentOrder->pack->discount ?? 0);
-            }
+            $discount = floatval($pack->discount ?? 0);
 
             foreach ($productList as $key => $product) {
                 $keyDetail     = array_search($product->id, array_column($dataBody->products, 'product'));
@@ -673,15 +688,25 @@ class FinanceController extends BaseController
                 }
                 $totalAmount += $subtotal;
 
-                if ($paymentLog?->paymentOrder?->pack_id != null) {
-                    $productPointPack                      = ProductPointPack::where("product_id", $product->id)
-                        ->where("pack_id", $paymentLog->paymentOrder->pack_id)
-                        ->first();
-                    if ($productPointPack != null) {
-                        $totalPoints += $productPointPack->point * $productDetail->quantity;
-                    }
-                }
+                $pointsPerUnit = $this->effectiveProductPoints($product, $pack->id);
+                $totalPoints += $pointsPerUnit * $productDetail->quantity;
             }
+
+            $minimumPoints = (float) (Option::where('option_key', 'reactivation_min_points')->value('option_value') ?? 150);
+            if ($totalPoints < $minimumPoints) {
+                DB::rollBack();
+                return $this->sendError("La seleccion debe alcanzar al menos {$minimumPoints} puntos.", [
+                    'selected_points' => $totalPoints, 'minimum_points' => $minimumPoints,
+                ], 422);
+            }
+
+            $reactivation = ManualReactivation::create([
+                'user_id' => $userUpdated->id,
+                'activated_by' => $userModel->id,
+                'amount' => $totalAmount,
+                'points' => $totalPoints,
+                'state' => ManualReactivation::ACTIVE,
+            ]);
 
             $paymentProductOrder = PaymentProductOrder::create([
                 'currency' => 'PEN',
@@ -689,7 +714,7 @@ class FinanceController extends BaseController
                 'discount' => $discount,
                 'points'   => $totalPoints,
                 'user_id'  => $userUpdated->id,
-                'pack_id'  => $paymentLog->paymentOrder->pack_id ?? null,
+                'pack_id'  => $pack->id,
                 'phone'    => "",
                 'address'  => "",
                 'state'    => PaymentProductOrder::PAGADO,
@@ -705,12 +730,8 @@ class FinanceController extends BaseController
                 $subtotal = $product->price * $productDetail->quantity;
                 $_points  = 0;
 
-                $productPointPack = ProductPointPack::where("product_id", $product->id)
-                    ->where("pack_id", $paymentLog?->paymentOrder?->pack_id)
-                    ->first();
-                if ($productPointPack != null) {
-                    $_points            = $productPointPack->point * $productDetail->quantity;
-                }
+                $pointsPerUnit = $this->effectiveProductPoints($product, $pack->id);
+                $_points = $pointsPerUnit * $productDetail->quantity;
 
                 if ($discount > 0) {
                     $price    = $price * (100 - $discount) / 100;
@@ -732,17 +753,32 @@ class FinanceController extends BaseController
 
             PaymentProductOrderDetail::insert($productListCreate);
 
-            PaymentProductOrderPoint::create([
+            $productOrderPoint = PaymentProductOrderPoint::create([
                 'payment_product_order_id' => $paymentProductOrder->id,
                 'user_id'                  => $userUpdated->id,
                 'points'                   => $totalPoints,
                 'state'                    => true
             ]);
 
-            $orderId     = $paymentLog ? $paymentLog->payment_order_id : null;
-            $sponsorCode = $paymentLog && $paymentLog->paymentOrder ? $paymentLog->paymentOrder->sponsor_code : 'COMPANY';
+            $sponsorCode = $paymentLog?->paymentOrder?->sponsor_code
+                ?? SponsorRelation::where('user_code', $userUpdated->uuid)->value('sponsor_code')
+                ?? 'COMPANY';
+
+            // Referencia unica del ciclo mensual. No representa una nueva compra
+            // del pack y por eso su importe es cero; permite separar ganancias
+            // residuales de meses y reactivaciones diferentes.
+            $monthlyReferenceOrder = PaymentOrder::create([
+                'currency' => 'PEN',
+                'amount' => 0,
+                'sponsor_code' => $sponsorCode,
+                'pack_id' => $pack->id,
+                'token' => 'REACTIVATION-' . $reactivation->id . '-' . uniqid(),
+            ]);
+            $orderId = $monthlyReferenceOrder->id;
+            $createdPaymentOrderIds[] = $orderId;
 
             PaymentOrderPoint::create([
+                'manual_reactivation_id' => $reactivation->id,
                 'payment_order_id' => $orderId,
                 'user_code'        => $userUpdated->uuid,
                 'sponsor_code'     => $sponsorCode,
@@ -756,7 +792,8 @@ class FinanceController extends BaseController
             $currentSponsorCode = $sponsorCode;
             $level              = 1;
             
-            while (!empty($currentSponsorCode) && $level <= 15) {
+            $maxNetworkLevel = (int) \App\Models\RangeRule::where('state', true)->max('depth_to');
+            while (!empty($currentSponsorCode) && $level <= $maxNetworkLevel) {
                 $sponsorUser                               = User::where('uuid', $currentSponsorCode)->first();
                 if (!$sponsorUser) break;
 
@@ -766,6 +803,7 @@ class FinanceController extends BaseController
                 $superiorSponsorCode = $relation ? $relation->sponsor_code : '';
 
                 PaymentOrderPoint::create([
+                    'manual_reactivation_id' => $reactivation->id,
                     'payment_order_id' => $orderId,
                     'user_code'        => $currentSponsorCode,
                     'sponsor_code'     => $superiorSponsorCode,
@@ -779,48 +817,33 @@ class FinanceController extends BaseController
                 $level++;
             }
 
-            $paymentProductOrderPoints = PaymentProductOrderPoint::where("user_id", $userUpdated->id)
-                ->where("state", true)
-                ->get();
+            $residualSummary = $this->commissionService->confirmPointAfiliado(
+                $userUpdated,
+                $totalPoints,
+                $reactivation->id,
+                $orderId
+            );
 
-            $personalPoint = 0;
-            foreach ($paymentProductOrderPoints as $key => $paymentProductOrderPoint) {
-                $personalPoint += $paymentProductOrderPoint->points;
-            }
+            $createdPaymentOrderPointIds = PaymentOrderPoint::where('manual_reactivation_id', $reactivation->id)
+                ->pluck('id')->all();
+            $reactivation->update([
+                'payment_product_order_id' => $paymentProductOrder->id,
+                'payment_order_point_ids' => $createdPaymentOrderPointIds,
+                'payment_product_order_point_ids' => [$productOrderPoint->id],
+                'payment_log_ids' => $createdPaymentLogIds,
+                'payment_order_ids' => $createdPaymentOrderIds,
+            ]);
 
-            $maxPointsProduct = Option::where("option_key", "max_points_product")->first();
-
-            if ($personalPoint >= floatval($maxPointsProduct->option_value)) {
-                $__paymentLog    = PaymentLog::with(['paymentOrder.pack'])
-                    ->where("user_id",  $userUpdated->id)
-                    ->whereIn("state", [PaymentLog::TERMINADO])
-                    ->orderBy('created_at', 'desc')
-                    ->first();
-
-                if ($__paymentLog != null) {
-                    $orderId2       = uniqid($paymentLog->paymentOrder->pack->title);
-
-                    $_paymentOrder = PaymentOrder::create([
-                        'currency'     => "PEN",
-                        'amount'       => $paymentLog->paymentOrder->pack->price,
-                        'sponsor_code' => $paymentLog->paymentOrder->sponsor_code,
-                        'pack_id'      => $paymentLog->paymentOrder->pack_id,
-                        "token"        => $orderId2
-                    ]);
-
-                    $_paymentLog = PaymentLog::create([
-                        'payment_order_id' => $_paymentOrder->id,
-                        "confirm"          => true,
-                        'user_id'          => $userUpdated->id,
-                        "state"            => PaymentLog::PAGADO,
-                    ]);
-                }
-            }
-
-            $this->commissionService->confirmPointAfiliado($userUpdated, $totalPoints);
-
+            ActivationService::clearCache();
             DB::commit();
-            return $this->sendResponse(1, 'Usuario reactivado en la red exitosamente.');
+            return $this->sendResponse([
+                'reactivation_id' => $reactivation->id,
+                'user_code' => $userUpdated->uuid,
+                'active' => true,
+                'amount' => $reactivation->amount,
+                'points' => $reactivation->points,
+                'residual' => $residualSummary,
+            ], 'Usuario reactivado en la red exitosamente.');
         } catch (Exception $e) {
             DB::rollBack();
             return $this->sendError($e->getMessage(), [], 402);
@@ -842,7 +865,9 @@ class FinanceController extends BaseController
             $userCurrent = User::where("uuid", $dataBody->userCode)->first();
 
             PaymentLog::where("user_id", $userCurrent->id)->update(["state"               => PaymentLog::RESET]);
-            PaymentOrderPoint::where("user_id", $userCurrent->id)->update(["state"        => false, "type" => PaymentOrderPoint::RESET]);
+            PaymentOrderPoint::where("user_id", $userCurrent->id)
+                ->whereIn('type', [PaymentOrderPoint::COMPRA, PaymentOrderPoint::GRUPAL])
+                ->update(["state" => false]);
             PaymentProductOrder::where("user_id", $userCurrent->id)->update(["state"      => PaymentProductOrder::TERMINADO]);
             PaymentProductOrderPoint::where("user_id", $userCurrent->id)->update(["state" => false]);
             RangeUser::where("user_id", $userCurrent->id)->update(["status"               => false]);
@@ -861,7 +886,9 @@ class FinanceController extends BaseController
             PaymentLog::with(['paymentOrder'])->where('state', PaymentLog::PAGADO)
                 ->update(["state" => PaymentLog::TERMINADO]);
 
-            PaymentOrderPoint::where('state', true)->update(["state"                          => false, "type" => PaymentOrderPoint::RESET]);
+            PaymentOrderPoint::where('state', true)
+                ->whereIn('type', [PaymentOrderPoint::COMPRA, PaymentOrderPoint::GRUPAL])
+                ->update(["state" => false]);
             PaymentProductOrderPoint::where("state", true)->update(["state"                   => false]);
             PaymentProductOrder::where("state", PaymentProductOrder::PAGADO)->update(["state" => PaymentProductOrder::TERMINADO]);
             RangeUser::where("status", true)->update(["status"                                => false]);
@@ -885,24 +912,216 @@ class FinanceController extends BaseController
 
             $dataBody    = (object) $request->all();
             $userCurrent = User::where("uuid", $dataBody->userCode)->first();
+            if (!$userCurrent) {
+                DB::rollBack();
+                return $this->sendError('No existe el usuario seleccionado', [], 404);
+            }
+            $this->reconcileManualReactivations($userCurrent);
+            $reactivation = ManualReactivation::where('user_id', $userCurrent->id)
+                ->where('state', ManualReactivation::ACTIVE)->latest('id')->lockForUpdate()->first();
+            if (!$reactivation) {
+                DB::rollBack();
+                return $this->sendError(
+                    'No existe una activacion mensual registrada que pueda desactivarse. No se modificaron el usuario, su paquete ni sus puntos historicos.',
+                    [],
+                    422
+                );
+            }
 
-            PaymentLog::where("user_id", $userCurrent->id)
-                ->where('state', PaymentLog::PAGADO)
-                ->update(["state" => PaymentLog::TERMINADO]);
+            PaymentOrderPoint::whereIn('id', $reactivation->payment_order_point_ids ?? [])
+                ->update(['state' => false, 'point' => 0, 'type' => PaymentOrderPoint::RESET]);
+            PaymentProductOrderPoint::whereIn('id', $reactivation->payment_product_order_point_ids ?? [])
+                ->update(['state' => false, 'points' => 0]);
+            PaymentProductOrder::whereKey($reactivation->payment_product_order_id)
+                ->update(['state' => PaymentProductOrder::ANULADO, 'amount' => 0, 'discount' => 0, 'points' => 0]);
+            PaymentProductOrderDetail::where('payment_product_order_id', $reactivation->payment_product_order_id)
+                ->update(['price' => 0, 'subtotal' => 0]);
+            PaymentLog::whereIn('id', $reactivation->payment_log_ids ?? [])->update(['state' => PaymentLog::RESET]);
+            PaymentOrder::whereIn('id', $reactivation->payment_order_ids ?? [])->update(['amount' => 0]);
+            $reactivation->update([
+                'state' => ManualReactivation::DEACTIVATED,
+                'deactivated_at' => now(),
+                'deactivated_by' => Auth::id(),
+            ]);
 
-            PaymentOrderPoint::where("user_id", $userCurrent->id)
-                ->where("state", true)
-                ->update(["state" => false, "type" => PaymentOrderPoint::RESET]);
-
-            PaymentProductOrder::where("user_id", $userCurrent->id)->update(["state"      => PaymentProductOrder::TERMINADO]);
-            PaymentProductOrderPoint::where("user_id", $userCurrent->id)->update(["state" => false]);
-
+            ActivationService::clearCache();
             DB::commit();
-            return $this->sendResponse(1, '');
+            $userCurrent->refresh();
+            return $this->sendResponse([
+                'reactivation_id' => $reactivation->id,
+                'user_code' => $userCurrent->uuid,
+                'active' => $userCurrent->active,
+                'points' => 0,
+            ], 'Puntos de activacion mensual desactivados. El usuario, su red, su paquete y sus puntos historicos no fueron eliminados.');
         } catch (Exception $e) {
             DB::rollBack();
             return $this->sendError($e->getMessage(), [], 402);
         }
+    }
+
+    public function commissionSummary(Request $request)
+    {
+        if (!Auth::user()?->is_admin) return $this->sendError('No tiene permisos ese usuario', [], 403);
+        $validator = Validator::make($request->query(), [
+            'month' => 'nullable|integer|between:1,12',
+            'year' => 'nullable|integer|min:2000',
+            'user_code' => 'nullable|exists:users,uuid',
+        ]);
+        if ($validator->fails()) return $this->sendError('Error de validacion.', $validator->errors(), 422);
+
+        $month = (int) $request->query('month', now()->month);
+        $year = (int) $request->query('year', now()->year);
+        $from = Carbon::create($year, $month, 1)->startOfMonth();
+        $to = $from->copy()->endOfMonth();
+        $ledger = app(FinancialLedgerService::class);
+        $summary = $ledger->summary($from, $to, $request->query('user_code'));
+        $summary['period'] = ['month' => $month, 'year' => $year];
+        $summary['formula'] = 'bono_total = patrocinio + residual + infinito';
+
+        return $this->sendResponse($summary, 'Resumen financiero de comisiones');
+    }
+
+    public function reactivationStatus(string $userCode)
+    {
+        if (!Auth::user()?->is_admin) return $this->sendError('No tiene permisos ese usuario', [], 403);
+        $user = User::where('uuid', $userCode)->first();
+        if (!$user) return $this->sendError('No existe el usuario seleccionado', [], 404);
+        $this->reconcileManualReactivations($user);
+        $reactivation = ManualReactivation::where('user_id', $user->id)->latest('id')->first();
+        $canDeactivate = $reactivation?->state === ManualReactivation::ACTIVE;
+        $eligibility = $this->reactivationEligibility($user);
+        $canReactivate = !$user->active && !$canDeactivate && $eligibility['eligible'];
+        return $this->sendResponse([
+            'user_code' => $user->uuid,
+            'is_active' => $user->active,
+            'manual_reactivation_active' => $canDeactivate,
+            'legacy_reactivation' => false,
+            'reactivation' => $reactivation,
+            'reactivation_eligibility' => $eligibility,
+            'actions' => [
+                'can_reactivate' => $canReactivate,
+                'can_deactivate' => $canDeactivate,
+                'reactivate_label' => 'Reactivar puntos',
+                'deactivate_label' => 'Desactivar puntos',
+            ],
+        ], 'Estado de reactivacion');
+    }
+
+    public function reactivationProducts(string $userCode)
+    {
+        if (!Auth::user()?->is_admin) return $this->sendError('No tiene permisos ese usuario', [], 403);
+        $user = User::where('uuid', $userCode)->first();
+        if (!$user) return $this->sendError('No existe el usuario seleccionado', [], 404);
+        if ($user->active) return $this->sendError('El usuario se encuentra activo; todavía no corresponde reactivar sus puntos.', [], 422);
+        $eligibility = $this->reactivationEligibility($user);
+        if (!$eligibility['eligible']) {
+            return $this->sendError($eligibility['message'], [
+                'reason' => $eligibility['reason'],
+                'eligible_from' => $eligibility['eligible_from'],
+            ], 422);
+        }
+        $pack = $this->productPack($user);
+        if (!$pack) {
+            return $this->sendError('El usuario no tiene un paquete de productos asociado.', [], 422);
+        }
+        $packId = $pack?->id;
+        $products = Product::with('file_image')->where('state', true)->orderBy('title')->get()
+            ->map(function (Product $product) use ($packId) {
+                $product->effective_points = $this->effectiveProductPoints($product, $packId);
+                $product->points = $product->effective_points;
+                return $product;
+            });
+        $minimumPoints = (float) (Option::where('option_key', 'reactivation_min_points')->value('option_value') ?? 150);
+        return $this->sendResponse([
+            'pack_id' => $packId,
+            'pack' => $pack ? ['id' => $pack->id, 'title' => $pack->title, 'category' => $pack->category] : null,
+            'minimum_points' => $minimumPoints,
+            'products' => $products,
+        ], 'Productos para reactivacion');
+    }
+
+    private function effectiveProductPoints(Product $product, ?string $packId): float
+    {
+        $specific = $packId ? ProductPointPack::where('product_id', $product->id)
+            ->where('pack_id', $packId)->value('point') : null;
+        return (float) ($specific ?? 0);
+    }
+
+    private function reactivationEligibility(User $user): array
+    {
+        if ($user->is_admin) {
+            return ['eligible' => false, 'reason' => 'administrator', 'eligible_from' => null,
+                'message' => 'Los administradores no requieren reactivacion mensual.'];
+        }
+
+        $reactivationOrderIds = ManualReactivation::where('user_id', $user->id)
+            ->whereNotNull('payment_product_order_id')->pluck('payment_product_order_id');
+        $firstProductPurchase = PaymentProductOrder::where('user_id', $user->id)
+            ->whereNotIn('id', $reactivationOrderIds)
+            ->whereIn('state', [PaymentProductOrder::PAGADO, PaymentProductOrder::ENVIADO, PaymentProductOrder::TERMINADO])
+            ->min('created_at');
+        $firstPackPurchase = PaymentLog::where('user_id', $user->id)
+            ->whereIn('state', [PaymentLog::PAGADO, PaymentLog::TERMINADO])
+            ->min('created_at');
+
+        $firstPurchase = collect([$firstProductPurchase, $firstPackPurchase])->filter()->min();
+        if (!$firstPurchase) {
+            return ['eligible' => false, 'reason' => 'no_package_purchase', 'eligible_from' => null,
+                'message' => 'El usuario aun no tiene una compra de paquete previa.'];
+        }
+
+        $eligibleFrom = Carbon::parse($firstPurchase)->startOfMonth()->addMonth();
+        if (now()->lt($eligibleFrom)) {
+            return ['eligible' => false, 'reason' => 'initial_package_period_active',
+                'eligible_from' => $eligibleFrom->toIso8601String(),
+                'message' => 'El paquete inicial todavia cubre el mes actual. La reactivacion estara disponible el siguiente mes.'];
+        }
+
+        return ['eligible' => true, 'reason' => 'monthly_activation_due',
+            'eligible_from' => $eligibleFrom->toIso8601String(),
+            'message' => 'El periodo inicial termino y el usuario puede reactivar sus puntos mensuales.'];
+    }
+
+    private function productPack(User $user): ?Pack
+    {
+        // La compra de productos conserva el pack realmente usado por el socio.
+        // Se excluyen solo las ordenes vinculadas a una reactivacion registrada;
+        // `type = 3` tambien existe en compras historicas validas y no identifica
+        // por si solo que la orden sea una simulacion.
+        $reactivationOrderIds = ManualReactivation::where('user_id', $user->id)
+            ->whereNotNull('payment_product_order_id')->pluck('payment_product_order_id');
+        $productOrder = PaymentProductOrder::with('pack')
+            ->where('user_id', $user->id)
+            ->whereNotIn('id', $reactivationOrderIds)
+            ->whereHas('pack', fn ($query) => $query->whereRaw('UPPER(category) = ?', ['PRODUCTO']))
+            ->latest('created_at')->first();
+
+        if ($productOrder?->pack) return $productOrder->pack;
+
+        return $this->productPackPaymentLog($user)?->paymentOrder?->pack;
+    }
+
+    private function productPackPaymentLog(User $user, ?string $packId = null): ?PaymentLog
+    {
+        return PaymentLog::with(['paymentOrder.pack'])->where('user_id', $user->id)
+            ->whereIn('state', [PaymentLog::PAGADO, PaymentLog::TERMINADO])
+            ->whereHas('paymentOrder.pack', fn ($query) => $query->whereRaw('UPPER(category) = ?', ['PRODUCTO']))
+            ->when($packId, fn ($query) => $query->whereHas('paymentOrder', fn ($order) => $order->where('pack_id', $packId)))
+            ->latest('created_at')->first();
+    }
+
+    private function reconcileManualReactivations(User $user): void
+    {
+        ManualReactivation::where('user_id', $user->id)->where('state', ManualReactivation::ACTIVE)
+            ->get()->each(function (ManualReactivation $reactivation) {
+                $orderState = PaymentProductOrder::whereKey($reactivation->payment_product_order_id)->value('state');
+                if (!in_array((int) $orderState, [PaymentProductOrder::PAGADO, PaymentProductOrder::ENVIADO], true)) {
+                    $reactivation->update([
+                        'state' => ManualReactivation::EXPIRED,
+                        'deactivated_at' => now(),
+                    ]);
+                }
+            });
     }
 
     public function deleteAllPaymentByUser(Request $request)

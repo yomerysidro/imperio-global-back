@@ -63,6 +63,8 @@ class User extends Authenticatable
     public function getActiveAttribute()
     {
         // USUARIOS ESPECIALES: SIEMPRE ACTIVOS
+        return app(\App\Services\Core\ActivationService::class)->isActive($this);
+        /* Legacy activation logic retained temporarily below; unreachable by design.
         $specialUsers = ['DOSB', 'WAdz'];
         
         if (in_array($this->uuid, $specialUsers)) {
@@ -82,7 +84,7 @@ class User extends Authenticatable
             ->whereYear('created_at', now()->year)
             ->exists();
 
-        return $hasService || $hasProduct;
+        return $hasService || $hasProduct; */
     }
 
     public function getPackageNameAttribute()

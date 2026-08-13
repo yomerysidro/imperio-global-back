@@ -15,6 +15,7 @@ use App\Http\Controllers\Api\PaymentProductOrderController;
 use App\Http\Controllers\Api\RangeController;
 use App\Http\Controllers\Api\CollectionRequestPatrocinioUserController;
 use App\Http\Controllers\Api\Services\ServiceOrderController;
+use App\Http\Controllers\Api\MlmRuleController;
 
 Route::prefix('v1')->group(function () {
 
@@ -53,6 +54,7 @@ Route::prefix('v1')->group(function () {
 
             // Rutas derivadas a FinanceController (Se mantiene URL, cambia Controlador)
             Route::get('cash-flow', [FinanceController::class, 'cashFlowFilter']);
+            Route::get('commission-summary', [FinanceController::class, 'commissionSummary']);
             Route::get('payments/find-all', [FinanceController::class, 'paymentsAll']);
             Route::post('change-sponsor', [FinanceController::class, 'changeSponsor']);
             Route::post('reset', [FinanceController::class, 'resetPoint']);
@@ -60,6 +62,8 @@ Route::prefix('v1')->group(function () {
             Route::post('reset-all-points', [FinanceController::class, 'resetAllPoint']);
             Route::post('desactive', [FinanceController::class, 'desactive']);
             Route::post('active-residual', [FinanceController::class, 'activeResidual']);
+            Route::get('reactivation-status/{userCode}', [FinanceController::class, 'reactivationStatus']);
+            Route::get('reactivation-products/{userCode}', [FinanceController::class, 'reactivationProducts']);
             Route::post('reset-send-email', [FinanceController::class, 'resetUserToTemp']);
             Route::post('pdf-finance', [FinanceController::class, 'exportPdfFinance']);
             Route::post('excel-finance', [FinanceController::class, 'exportExcelFinance']);
@@ -145,5 +149,8 @@ Route::prefix('v1')->group(function () {
             Route::post('users', [RangeController::class, 'users']);
             Route::post('user/{userCode}', [RangeController::class, 'usersByCode']);
         });
+
+        Route::get('mlm-rules', [MlmRuleController::class, 'index']);
+        Route::put('mlm-rules', [MlmRuleController::class, 'update']);
     });
 });

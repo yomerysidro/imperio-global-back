@@ -17,16 +17,26 @@ class PointCalculator
             return strtoupper($point->user_code) === strtoupper($userUuid);
         })->values();
 
-        $patrocinioProducto = $userPoints->where('type', PaymentOrderPoint::PATROCINIO)->sum('point');
-        $patrocinioServicio = $userPoints->whereIn('type', [PaymentOrderPoint::PATROCINIO_SERVICIO, 'S'])->sum('point');
+        $commissions = $userPoints->whereIn('type', ['P', 'PS', 'S', 'R', 'RS', 'I'])
+            ->groupBy(function ($point) {
+                $type = $point->type === 'S' ? 'PS' : $point->type;
+                return implode('|', [$point->payment_order_id ?: 'ROW-'.$point->id, strtoupper($point->user_code),
+                    (int) ($point->level ?? 0), $type]);
+            })->map(fn ($rows) => $rows->sortByDesc('point')->first())->values();
+
+        $patrocinioProducto = $commissions->where('type', PaymentOrderPoint::PATROCINIO)->sum('point');
+        $patrocinioServicio = $commissions
+            ->whereIn('type', [PaymentOrderPoint::PATROCINIO_SERVICIO, 'S'])
+            ->groupBy(fn ($point) => $point->payment_order_id ?: 'ROW-'.$point->id)
+            ->sum(fn ($rows) => $rows->max('point'));
         $patrocinio = $patrocinioProducto + $patrocinioServicio;
-        $residualProducto = $userPoints->where('type', PaymentOrderPoint::RESIDUAL)->sum('point');
-        $residualServicio = $userPoints->where('type', PaymentOrderPoint::RESIDUAL_SERVICIO)->sum('point');
+        $residualProducto = $commissions->where('type', PaymentOrderPoint::RESIDUAL)->sum('point');
+        $residualServicio = $commissions->where('type', PaymentOrderPoint::RESIDUAL_SERVICIO)->sum('point');
         $residual = $residualProducto + $residualServicio;
         $compra = (object) ['total_puntos' => $userPoints->where('type', PaymentOrderPoint::COMPRA)->sum('point')];
         $pointGroup     = $userPoints->where('type', PaymentOrderPoint::GRUPAL)->sum('point');
         $personal       = $userPoints->where('type', PaymentOrderPoint::COMPRA)->sum('point');
-        $infinito       = $userPoints->where('type', PaymentOrderPoint::INFINITO)->sum('point');
+        $infinito       = $commissions->where('type', PaymentOrderPoint::INFINITO)->sum('point');
         $pointAfiliado  = 0;
         $personalGlobal = 0;
 
@@ -41,6 +51,8 @@ class PointCalculator
             'pointGroup'          => $pointGroup,
             'personal'            => $personal,
             'infinito'            => $infinito,
+            'bono'                => $patrocinio,
+            'bono_total'          => $patrocinio + $residual + $infinito,
             'pointAfiliado'       => $pointAfiliado,
             'personalGlobal'      => $personalGlobal,
             'puntos_personales'   => $personal,
@@ -104,19 +116,13 @@ class PointCalculator
 
     public function calculateRange($totalPoints, $directos)
     {
-        $ranges       = Range::where("state", true)->orderBy('points', 'asc')->get();
+        $ranges       = Range::with('rule')->where("state", true)->orderBy('order')->get();
         $rangeCurrent = null;
 
         foreach ($ranges as $range) {
-            if ($range->points <= $totalPoints && $range->childs <= (int) $directos) {
+            if ($range->rule && $range->rule->required_points <= $totalPoints
+                && $range->rule->required_active_lines <= (int) $directos) {
                 $rangeCurrent = $range;
-            }
-        }
-
-        if (!$rangeCurrent) {
-            $bronce = Range::where('points', 1000)->where('childs', 1)->where('state', true)->first();
-            if ($bronce && $totalPoints >= 1000 && $directos >= 1) {
-                $rangeCurrent = $bronce;
             }
         }
 

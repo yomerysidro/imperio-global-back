@@ -242,13 +242,17 @@ class PaymentOrderPointController extends BaseController
 
             // TUS PUNTOS: Si estás inactivo, TODO en 0 excepto comisiones históricas
             if (!$isActive) {
+                $historical = $this->calculator->points($userModel->uuid, $historicalCommissions, collect());
                 $userModel->points = (object) [
-                    "patrocinio" => 0,
-                    "residual" => 0,
+                    "patrocinio" => $historical->patrocinio,
+                    "bono" => $historical->patrocinio,
+                    "residual" => $historical->residual,
                     "compra" => (object) ["total_puntos" => 0, "total_gastado" => 0],
                     "pointGroup" => 0,
                     "personal" => 0,
-                    "infinito" => 0,
+                    "infinito" => $historical->infinito,
+                    "bono_total" => $historical->bono_total,
+                    "total_comisiones" => $historical->total_comisiones,
                     "pointAfiliado" => 0,
                     "personalGlobal" => 0,
                     "patrocinioRequest" => 0,
