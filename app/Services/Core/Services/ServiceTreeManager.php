@@ -3,65 +3,71 @@
 namespace App\Services\Core\Services;
 
 use App\Models\PaymentOrderPoint;
-use App\Models\User;
 use App\Models\SponsorshipPoint;
+use App\Models\User;
+use App\Services\Core\NetworkTreeService;
 
 class ServiceTreeManager
 {
-    public function distributePoints($userCode, $orderId, $points, $packId, $level = 1)
+    private const MAX_SPONSORSHIP_LEVEL = 5;
+    private const MAX_NETWORK_LEVEL = 15;
+
+    public function distributePoints($userCode, $orderId, $points, $packId, $level = 1, &$visited = [])
     {
-        if ($level > 5) return;
+        if ($level > self::MAX_NETWORK_LEVEL) return;
 
-        // Relación de patrocinio
-        $relation = PaymentOrderPoint::where('user_code', $userCode)
-            ->whereIn('type', [PaymentOrderPoint::PATROCINIO, PaymentOrderPoint::COMPRA, 'P', 'B'])
-            ->where('payment', 1)
-            ->first();
+        $normalized = strtoupper($userCode);
+        if (isset($visited[$normalized])) return;
+        $visited[$normalized] = true;
 
-        if ($relation && $relation->sponsor_code) {
-            $sponsor = User::where('uuid', $relation->sponsor_code)->first();
+        $tree = new NetworkTreeService();
+        $sponsorCode = $tree->sponsorCode($userCode);
+        if (!$sponsorCode) return;
 
-            if ($sponsor) {
-                // 1. BONO ECONÓMICO (Calculado con el % del pack)
-                $commission = $this->calculateServicePoints($points, $level, $packId);
+        $sponsor = User::where('uuid', $sponsorCode)->first();
+        if (!$sponsor) return;
 
-                if ($commission > 0) {
-                    PaymentOrderPoint::create([
-                        'payment_order_id' => $orderId,
-                        'user_code'        => $userCode,
-                        'sponsor_code'     => $sponsor->uuid,
-                        'point'            => $commission,
-                        'payment'          => true,
-                        'type'             => PaymentOrderPoint::PATROCINIO_SERVICIO,
-                        'user_id'          => $sponsor->id,
-                        'state'            => true
-                    ]);
-                }
-
-                // 2. PUNTOS GRUPALES (Volumen 100% para Rango)
-                PaymentOrderPoint::create([
-                    'payment_order_id' => $orderId,
-                    'user_code'        => $userCode,
-                    'sponsor_code'     => $sponsor->uuid,
-                    'point'            => $points,
-                    'payment'          => false,
-                    'type'             => PaymentOrderPoint::GRUPAL,
-                    'user_id'          => $sponsor->id,
-                    'state'            => true
-                ]);
-
-                $this->distributePoints($sponsor->uuid, $orderId, $points, $packId, $level + 1);
-            }
+        $commission = $level <= self::MAX_SPONSORSHIP_LEVEL
+            ? $this->calculateServicePoints($points, $level, $packId)
+            : 0;
+        if ($commission > 0) {
+            PaymentOrderPoint::firstOrCreate([
+                'payment_order_id' => $orderId,
+                'user_code' => $sponsor->uuid,
+                'type' => PaymentOrderPoint::PATROCINIO_SERVICIO,
+                'level' => $level,
+            ], [
+                'sponsor_code' => $tree->sponsorCode($sponsor->uuid) ?? '',
+                'source_user_code' => $userCode,
+                'point' => $commission,
+                'payment' => false,
+                'user_id' => $sponsor->id,
+                'state' => true,
+            ]);
         }
+
+        PaymentOrderPoint::firstOrCreate([
+            'payment_order_id' => $orderId,
+            'user_code' => $sponsor->uuid,
+            'type' => PaymentOrderPoint::GRUPAL,
+        ], [
+            'sponsor_code' => $tree->sponsorCode($sponsor->uuid) ?? '',
+            'source_user_code' => $userCode,
+            'point' => $points,
+            'payment' => false,
+            'level' => $level,
+            'user_id' => $sponsor->id,
+            'state' => true,
+        ]);
+
+        $this->distributePoints($sponsor->uuid, $orderId, $points, $packId, $level + 1, $visited);
     }
 
     private function calculateServicePoints($totalPoints, $level, $packId)
     {
         $config = SponsorshipPoint::where('pack_id', $packId)->first();
-        if ($config) {
-            $percent = $config->{"level{$level}"} ?? 0;
-            return floatval($totalPoints) * (floatval($percent) / 100);
-        }
-        return 0;
+        $percent = (float) ($config?->{"level{$level}"} ?? 0);
+
+        return (float) $totalPoints * $percent / 100;
     }
 }

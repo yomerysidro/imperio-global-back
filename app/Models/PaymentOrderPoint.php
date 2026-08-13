@@ -29,9 +29,11 @@ class PaymentOrderPoint extends Model
         'payment_order_id',
         'user_code',
         'sponsor_code',
+        'source_user_code',
         'point',
         'payment',
         'type',
+        'level',
         'state',
         'user_id'
     ];

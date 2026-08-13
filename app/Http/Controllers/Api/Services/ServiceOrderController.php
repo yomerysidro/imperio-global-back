@@ -67,7 +67,7 @@ class ServiceOrderController extends BaseController
 
             // 3. DISTRIBUIR PUNTOS A LOS PATROCINADORES (Hacia arriba)
             $treeManager = new ServiceTreeManager();
-            $treeManager->distributePoints($user->uuid, $order->id, $pack->points);
+            $treeManager->distributePoints($user->uuid, $order->id, $pack->points, $pack->id);
 
             DB::commit();
             return $this->sendResponse($order, 'Paquete de servicio activado exitosamente.');

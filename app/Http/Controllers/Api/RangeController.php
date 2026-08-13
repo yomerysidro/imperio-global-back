@@ -17,16 +17,19 @@ use App\Models\RangeUser;
 use App\Models\PaymentProductOrderPoint;
 use Illuminate\Support\Facades\Storage;
 use App\Services\Core\Calculator;
+use App\Services\Core\NetworkTreeService;
 
 class RangeController extends BaseController
 {
     //
 
     private $calculator;
+    private $networkTreeService;
 
     public function __construct()
     {
         $this->calculator = new Calculator();
+        $this->networkTreeService = new NetworkTreeService();
     }
 
     public function list( Request $request )
@@ -431,24 +434,14 @@ class RangeController extends BaseController
 
     private function countTreeRange( string $userCode , $rangeId)
     {
-        $paymentOrderPoints = $this->loopTreeActive( array(), $userCode);
+        $codes = $this->networkTreeService->getAllNetworkUsers($userCode);
+        $codes = array_values(array_filter($codes, fn ($code) => strcasecmp($code, $userCode) !== 0));
 
-        $a_paymentOrderPoint = array();
-
-        $count = 0;
-
-        foreach ($paymentOrderPoints as $key => $paymentOrderPoint) {
-            $paymentOrderPoint = (object) $paymentOrderPoint;
-            $rangeUser = RangeUser::where("user_id", $paymentOrderPoint->user->id )->where("status" , 1)->first();
-            if( $rangeUser == null ) continue;
-            if( $rangeUser->range_id == $rangeId && $paymentOrderPoint->user->paymentActive != null) $count++;
-
-            $count += $this->countTreeRange( $paymentOrderPoint->user_code, $rangeId );
-
-            array_push($a_paymentOrderPoint , $paymentOrderPoint);
-        }
-
-        return $count;
+        return User::whereIn('uuid', $codes)
+            ->whereHas('range', fn ($query) => $query->where('range_id', $rangeId)->where('status', true))
+            ->get()
+            ->filter(fn ($user) => $user->active)
+            ->count();
     }
 
     private function createUpdateRangeUser( $userId, $rangeId, $active)

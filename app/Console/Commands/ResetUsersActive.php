@@ -223,9 +223,18 @@ class ResetUsersActive extends Command
             PaymentLog::with(['paymentOrder'])->where('state' , PaymentLog::PAGADO)
                 ->update(array( "state" => PaymentLog::TERMINADO ));
 
-            PaymentOrderPoint::where('state' , true )->update(array( "state" => false ));
-            PaymentProductOrder::where('state' , PaymentProductOrder::PAGADO )->update(array( "state" => PaymentProductOrder::TERMINADO ));
-            PaymentProductOrderPoint::where("state" , true)->update(array( "state" => false ));
+            PaymentOrderPoint::where('state', true)
+                ->whereMonth('created_at', now()->month)
+                ->whereYear('created_at', now()->year)
+                ->update(["state" => false]);
+            PaymentProductOrder::where('state', PaymentProductOrder::PAGADO)
+                ->whereMonth('created_at', now()->month)
+                ->whereYear('created_at', now()->year)
+                ->update(["state" => PaymentProductOrder::TERMINADO]);
+            PaymentProductOrderPoint::where('state', true)
+                ->whereMonth('created_at', now()->month)
+                ->whereYear('created_at', now()->year)
+                ->update(["state" => false]);
 
             RangeUser::where("status", true)->update( array("status" => false) );
 

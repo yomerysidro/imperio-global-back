@@ -11,6 +11,7 @@ use App\Models\PaymentProductOrder;
 use App\Models\PaymentOrderPoint;
 use App\Models\PaymentProductOrderPoint;
 use App\Services\Core\Calculator;
+use App\Services\Core\NetworkTreeService;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Exception;
@@ -18,10 +19,12 @@ use Exception;
 class PaymentOrderPointController extends BaseController
 {
     private $calculator;
+    private $networkTreeService;
 
     public function __construct()
     {
         $this->calculator = new Calculator();
+        $this->networkTreeService = new NetworkTreeService();
     }
 
     /**
@@ -135,7 +138,10 @@ class PaymentOrderPointController extends BaseController
             // -----------------------------------------------------------
 
             // OBTENEMOS A TODA LA RED SIN IMPORTAR EL MES (para mostrar árbol)
-            $allDownlineCodes = $this->getRecursiveDownline([$userModel->uuid]);
+            $allDownlineCodes = array_values(array_filter(
+                $this->networkTreeService->getAllNetworkUsers($userModel->uuid),
+                fn ($code) => strcasecmp($code, $userModel->uuid) !== 0
+            ));
 
             $rawNetworkPoints = PaymentOrderPoint::with(['userPoint.file', 'userPoint.paymentActive', 'sponsor'])
                 ->whereIn('user_code', $allDownlineCodes)
@@ -146,6 +152,30 @@ class PaymentOrderPointController extends BaseController
 
             $networkPoints = $rawNetworkPoints->unique('user_code')->values();
 
+            // Una relación genealógica puede existir aunque el movimiento B
+            // histórico falte o haya sido desactivado. Esos socios también
+            // pertenecen al árbol y deben aparecer como nodos sin puntos.
+            $codesWithPoint = $networkPoints->pluck('user_code')
+                ->map(fn ($code) => strtoupper($code))->all();
+            $missingCodes = array_values(array_filter(
+                $allDownlineCodes,
+                fn ($code) => !in_array(strtoupper($code), $codesWithPoint, true)
+            ));
+            $missingUsers = User::with('file')->whereIn('uuid', $missingCodes)->get()->keyBy(
+                fn ($user) => strtoupper($user->uuid)
+            );
+            foreach ($missingCodes as $missingCode) {
+                $placeholder = new PaymentOrderPoint();
+                $placeholder->user_code = $missingCode;
+                $placeholder->sponsor_code = $this->networkTreeService->sponsorCode($missingCode);
+                $placeholder->type = PaymentOrderPoint::COMPRA;
+                $placeholder->point = 0;
+                $placeholder->payment = 0;
+                $placeholder->state = 0;
+                $placeholder->setRelation('userPoint', $missingUsers->get(strtoupper($missingCode)));
+                $networkPoints->push($placeholder);
+            }
+
             // OBTENEMOS LOS PUNTOS ESTRICTAMENTE DEL MES DE EVALUACIÓN
             $allPointsTable = PaymentOrderPoint::where('state', true)
                 ->whereMonth('created_at', $mesFiltro)->whereYear('created_at', $anioFiltro)->get();
@@ -154,12 +184,13 @@ class PaymentOrderPointController extends BaseController
 
             // COMISIONES HISTÓRICAS ACUMULADAS (Patrocinio + Residual de TODOS los meses)
             $historicalCommissions = PaymentOrderPoint::where('state', true)
-                ->where('sponsor_code', $userModel->uuid)
+                ->where('user_code', $userModel->uuid)
                 ->whereIn('type', [
                     PaymentOrderPoint::PATROCINIO,
                     PaymentOrderPoint::PATROCINIO_SERVICIO,
                     PaymentOrderPoint::RESIDUAL,
-                    PaymentOrderPoint::RESIDUAL_SERVICIO
+                    PaymentOrderPoint::RESIDUAL_SERVICIO,
+                    PaymentOrderPoint::INFINITO
                 ])
                 ->get();
 
@@ -204,9 +235,10 @@ class PaymentOrderPointController extends BaseController
             }
 
             // CONTADORES DEL ÁRBOL
-            $userModel->directos = $networkPoints->where('sponsor_code', $userModel->uuid)->count();
+            $userModel->directos = count($this->networkTreeService->directUserCodes($userModel->uuid));
             $userModel->activos = $networkPoints->where('active', true)->count();
-            $userModel->red_total = $networkPoints->count();
+            $userModel->red_total = $this->networkTreeService->countTotalNetworkRecursive($userModel->uuid);
+            $userModel->personas_red = $userModel->red_total;
 
             // TUS PUNTOS: Si estás inactivo, TODO en 0 excepto comisiones históricas
             if (!$isActive) {

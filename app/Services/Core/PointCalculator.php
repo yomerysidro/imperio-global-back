@@ -17,8 +17,12 @@ class PointCalculator
             return strtoupper($point->user_code) === strtoupper($userUuid);
         })->values();
 
-        $patrocinio = $userPoints->whereIn('type', ['P', 'S'])->sum('point');
-        $residual   = $userPoints->where('type', PaymentOrderPoint::RESIDUAL)->sum('point');
+        $patrocinioProducto = $userPoints->where('type', PaymentOrderPoint::PATROCINIO)->sum('point');
+        $patrocinioServicio = $userPoints->whereIn('type', [PaymentOrderPoint::PATROCINIO_SERVICIO, 'S'])->sum('point');
+        $patrocinio = $patrocinioProducto + $patrocinioServicio;
+        $residualProducto = $userPoints->where('type', PaymentOrderPoint::RESIDUAL)->sum('point');
+        $residualServicio = $userPoints->where('type', PaymentOrderPoint::RESIDUAL_SERVICIO)->sum('point');
+        $residual = $residualProducto + $residualServicio;
         $compra = (object) ['total_puntos' => $userPoints->where('type', PaymentOrderPoint::COMPRA)->sum('point')];
         $pointGroup     = $userPoints->where('type', PaymentOrderPoint::GRUPAL)->sum('point');
         $personal       = $userPoints->where('type', PaymentOrderPoint::COMPRA)->sum('point');
@@ -28,7 +32,11 @@ class PointCalculator
 
         return (object) [
             'patrocinio'          => $patrocinio,
+            'patrocinioProducto'  => $patrocinioProducto,
+            'patrocinioServicio'  => $patrocinioServicio,
             'residual'            => $residual,
+            'residualProducto'    => $residualProducto,
+            'residualServicio'    => $residualServicio,
             'compra'              => $compra,
             'pointGroup'          => $pointGroup,
             'personal'            => $personal,
@@ -38,14 +46,16 @@ class PointCalculator
             'puntos_personales'   => $personal,
             'puntos_red'          => $pointGroup,
             'ganancia_patrocinio' => $patrocinio,
-            'total_general'       => $personal + $pointGroup + $residual
+            'total_general'       => $personal + $pointGroup,
+            'total_comisiones'    => $patrocinio + $residual + $infinito,
+            'ganancia_total'      => $patrocinio + $residual + $infinito
         ];
     }
 
     public function pointsTotal($userUuid, $paymentOrderPoints, $paymentProductOrderPoints)
     {
         $pointsObj = $this->points($userUuid, $paymentOrderPoints, $paymentProductOrderPoints);
-        return $pointsObj->personal + $pointsObj->pointGroup + $pointsObj->residual;
+        return $pointsObj->personal + $pointsObj->pointGroup;
     }
 
     public function getUserPaymentStatus($userId)

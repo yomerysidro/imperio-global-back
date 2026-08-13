@@ -13,7 +13,7 @@ use Carbon\Carbon;
 class Calculator
 {
     // Tipos donde point = monto en SOLES (ya calculado)
-    private const TIPOS_PATROCINIO = ['P', 'PS'];
+    private const TIPOS_PATROCINIO = ['P', 'PS', 'S'];
     private const TIPOS_RESIDUAL = ['R', 'RS'];
     private const TIPOS_COMPRA_PERSONAL = ['B'];
     private const TIPOS_VOLUMEN_GRUPAL = ['G'];
@@ -44,6 +44,7 @@ class Calculator
         $pointGroupServicio = 0.0;
         $puntosProducto = 0.0;
         $puntosServicio = 0.0;
+        $infinito = 0.0;
 
         // Control de duplicados
         $processedGanancia = [];
@@ -117,7 +118,7 @@ class Calculator
                     $categoria = $this->resolvePackCategory($packId, $orderId);
                     if ($tipoFila === 'P') {
                         $patrocinioProducto += $valorFila;
-                    } elseif ($tipoFila === 'PS') {
+                    } elseif (in_array($tipoFila, ['PS', 'S'], true)) {
                         $patrocinioServicio += $valorFila;
                     }
                     $processedGanancia[$key] = true;
@@ -136,6 +137,14 @@ class Calculator
                     } elseif ($tipoFila === 'RS') {
                         $residualServicio += $valorFila;
                     }
+                    $processedGanancia[$key] = true;
+                }
+            }
+
+            if ($userCodeUpper === $userCodeOrden && $tipoFila === PaymentOrderPoint::INFINITO) {
+                $key = "infinito_{$orderId}_" . ($orderPoint->level ?? 0);
+                if (!isset($processedGanancia[$key])) {
+                    $infinito += $valorFila;
                     $processedGanancia[$key] = true;
                 }
             }
@@ -192,10 +201,13 @@ class Calculator
             'pointGroupServicio' => round($pointGroupServicio, 2),
             'puntosPersonalesProducto' => round($puntosProducto, 2),
             'puntosPersonalesServicio' => round($puntosServicio, 2),
-            'infinito' => 0.0,
+            'infinito' => round($infinito, 2),
             'pointAfiliado' => 0.0,
             'personalGlobal' => 0.0,
             'patrocinioRequest' => 0.0,
+            'total_general' => round($personalTotal + $pointGroupTotal, 2),
+            'total_comisiones' => round($patrocinioTotal + $residualTotal + $infinito, 2),
+            'ganancia_total' => round($patrocinioTotal + $residualTotal + $infinito, 2),
             'legacy_bonus' => round($puntosProducto + $puntosServicio, 2), // 🔥 Bonus por legacy
         ];
     }
@@ -263,6 +275,9 @@ class Calculator
             'personalGlobal' => 0.0,
             'patrocinioRequest' => 0.0,
             'legacy_bonus' => 0.0,
+            'total_general' => 0.0,
+            'total_comisiones' => 0.0,
+            'ganancia_total' => 0.0,
         ];
     }
 }

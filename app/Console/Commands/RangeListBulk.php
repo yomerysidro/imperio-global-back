@@ -13,17 +13,20 @@ use App\Models\RangeUser;
 use App\Models\PaymentProductOrderPoint;
 use App\Services\Core\Calculator;
 use App\Models\PaymentLog;
+use App\Services\Core\NetworkTreeService;
 
 class RangeListBulk extends Command
 {
 
     
     private $calculator;
+    private $networkTreeService;
 
     public function __construct()
     {
         parent::__construct();
         $this->calculator = new Calculator();
+        $this->networkTreeService = new NetworkTreeService();
     }
     /**
      * The name and signature of the console command.
@@ -308,43 +311,24 @@ class RangeListBulk extends Command
 
     private function countTreeRange( string $userCode , $rangeId)
     {
-        $paymentOrderPoints = $this->loopTreeActive( array(), $userCode);
+        $codes = $this->networkTreeService->getAllNetworkUsers($userCode);
+        $codes = array_values(array_filter($codes, fn ($code) => strcasecmp($code, $userCode) !== 0));
 
-        $a_paymentOrderPoint = array();
-
-        $count = 0;
-
-        foreach ($paymentOrderPoints as $key => $paymentOrderPoint) {
-            $paymentOrderPoint = (object) $paymentOrderPoint;
-            $rangeUser = RangeUser::where("user_id", $paymentOrderPoint->user->id )->where("status" , 1)->first();
-            if( $rangeUser == null ) continue;
-            if( $rangeUser->range_id == $rangeId && $paymentOrderPoint->user->paymentActive != null) $count++;
-
-            $count += $this->countTreeRange( $paymentOrderPoint->user_code, $rangeId );
-
-            array_push($a_paymentOrderPoint , $paymentOrderPoint);
-        }
-
-        return $count;
+        return User::whereIn('uuid', $codes)
+            ->whereHas('range', fn ($query) => $query->where('range_id', $rangeId)->where('status', true))
+            ->get()
+            ->filter(fn ($user) => $user->active)
+            ->count();
     }
 
     private function countTreeRangeDirect(string $userCode , $rangeId)
     {
-        $paymentOrderPoints = PaymentOrderPoint::with(['user.paymentActive'])->where("sponsor_code" , 'like', $userCode)
-        ->whereIn("type", [PaymentOrderPoint::PATROCINIO])
-        ->where("payment" , 1)->get();
-
-        $count = 0;
-
-        foreach ($paymentOrderPoints as $key => $paymentOrderPoint) {
-            $paymentOrderPoint = (object) $paymentOrderPoint;
-            $rangeUser = RangeUser::where("user_id", $paymentOrderPoint->user->id )->where("status" , 1)->first();
-            if( $rangeUser == null ) continue;
-            if( $rangeUser->range_id == $rangeId && $paymentOrderPoint->user->paymentActive != null) $count++;
-
-        }
-        
-        return $count;
+        $codes = $this->networkTreeService->directUserCodes($userCode);
+        return User::whereIn('uuid', $codes)
+            ->whereHas('range', fn ($query) => $query->where('range_id', $rangeId)->where('status', true))
+            ->get()
+            ->filter(fn ($user) => $user->active)
+            ->count();
     }
 
     private function createUpdateRangeUser( $userId, $rangeId, $active)

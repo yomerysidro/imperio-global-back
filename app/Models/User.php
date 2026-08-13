@@ -70,15 +70,27 @@ class User extends Authenticatable
         }
         
         // Criterio Unificado: ¿Tiene algún pago de servicio o producto en estado 2 (PAGADO) o 6 (TERMINADO) en el mes actual?
-        return PaymentLog::where('user_id', $this->id)
+        $hasService = PaymentLog::where('user_id', $this->id)
             ->whereIn('state', [2, 6])
             ->whereMonth('created_at', now()->month)
             ->whereYear('created_at', now()->year)
             ->exists();
+
+        $hasProduct = PaymentProductOrder::where('user_id', $this->id)
+            ->whereIn('state', [2, 3, 6])
+            ->whereMonth('created_at', now()->month)
+            ->whereYear('created_at', now()->year)
+            ->exists();
+
+        return $hasService || $hasProduct;
     }
 
     public function getPackageNameAttribute()
     {
+        if (strtoupper($this->uuid) === 'DOSB') {
+            return 'Corporativo';
+        }
+
         $packages = [];
         
         // 1. Membresía de Servicios Digitales (Estado 2 o 6)
