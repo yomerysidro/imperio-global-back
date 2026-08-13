@@ -6,31 +6,69 @@ use App\Models\User;
 use App\Models\PaymentOrderPoint;
 use App\Models\GuestsTokenUser;
 use App\Models\PaymentLog;
+use App\Models\SponsorRelation;
+use App\Models\PaymentProductOrder;
 use Carbon\Carbon;
 
 class NetworkTreeService
 {
-    public function getAllNetworkUsers($userCode, &$visited = [])
+    public function directUserCodes(string $userCode): array
     {
-        if (in_array($userCode, $visited)) {
-            return [];
-        }
-        $visited[] = $userCode;
-        $users     = [$userCode];
-
-        $transactionalChildren = PaymentOrderPoint::where('sponsor_code', $userCode)
-            ->where('type', PaymentOrderPoint::COMPRA)
+        $relations = SponsorRelation::where('sponsor_code', $userCode)
             ->where('state', true)
             ->pluck('user_code')
-            ->unique()
+            ->filter(fn ($code) => strcasecmp($code, $userCode) !== 0)
+            ->unique(fn ($code) => strtoupper($code))
+            ->values()
             ->toArray();
 
-        $historicalChildren = GuestsTokenUser::where('sponsor_user_code', $userCode)
+        if ($relations) {
+            return $relations;
+        }
+
+        $purchases = PaymentOrderPoint::where('sponsor_code', $userCode)
+            ->where('type', PaymentOrderPoint::COMPRA)
+            ->pluck('user_code');
+        $guests = GuestsTokenUser::where('sponsor_user_code', $userCode)
             ->where('state', true)
-            ->pluck('guest_user_code')
-            ->toArray();
+            ->pluck('guest_user_code');
 
-        $allChildren = array_unique(array_merge($transactionalChildren, $historicalChildren));
+        return $purchases->merge($guests)
+            ->filter(fn ($code) => strcasecmp($code, $userCode) !== 0)
+            ->unique(fn ($code) => strtoupper($code))
+            ->values()
+            ->toArray();
+    }
+
+    public function sponsorCode(string $userCode): ?string
+    {
+        $relation = SponsorRelation::where('user_code', $userCode)
+            ->where('state', true)
+            ->first();
+
+        if ($relation && strcasecmp($relation->sponsor_code, $userCode) !== 0) {
+            return $relation->sponsor_code;
+        }
+
+        $legacy = PaymentOrderPoint::where('user_code', $userCode)
+            ->where('type', PaymentOrderPoint::COMPRA)
+            ->whereColumn('user_code', '!=', 'sponsor_code')
+            ->orderBy('created_at')
+            ->first();
+
+        return $legacy?->sponsor_code;
+    }
+
+    public function getAllNetworkUsers($userCode, &$visited = [])
+    {
+        $normalized = strtoupper($userCode);
+        if (in_array($normalized, $visited, true)) {
+            return [];
+        }
+        $visited[] = $normalized;
+        $users     = [$userCode];
+
+        $allChildren = $this->directUserCodes($userCode);
 
         foreach ($allChildren as $child) {
             $childUsers = $this->getAllNetworkUsers($child, $visited);
@@ -42,62 +80,17 @@ class NetworkTreeService
 
     public function countTotalNetworkRecursive($userCode, &$visited = [])
     {
-        if (in_array($userCode, $visited)) {
+        $normalized = strtoupper($userCode);
+        if (in_array($normalized, $visited, true)) {
             return 0;
         }
-        $visited[] = $userCode;
+        $visited[] = $normalized;
 
-        $count         = 0;
-        $now           = Carbon::now();
-        $currentMonth  = $now->month;
-        $currentYear   = $now->year;
-        $mesAnterior   = $now->copy()->subMonth();
-        $isGracePeriod = $now->day <= 2;
-
-        $transactionalChildren = PaymentOrderPoint::where('sponsor_code', $userCode)
-            ->where('type', PaymentOrderPoint::COMPRA)
-            ->where('state', true)
-            ->where('payment', 1)
-            ->where(function ($query) use ($currentMonth, $currentYear, $mesAnterior, $isGracePeriod) {
-                $query->whereMonth('created_at', $currentMonth)->whereYear('created_at', $currentYear);
-                if ($isGracePeriod) {
-                    $query->orWhere(function ($q) use ($mesAnterior) {
-                        $q->whereMonth('created_at', $mesAnterior->month)->whereYear('created_at', $mesAnterior->year);
-                    });
-                }
-            })
-            ->pluck('user_code')
-            ->toArray();
-
-        $historicalChildren = GuestsTokenUser::where('sponsor_user_code', $userCode)
-            ->where('state', true)
-            ->pluck('guest_user_code')
-            ->toArray();
-
-        $historicalChildrenActive = [];
-        foreach ($historicalChildren as $childCode) {
-            $user = User::where('uuid', $childCode)->first();
-            if ($user) {
-                $hasPayment = PaymentLog::where('user_id', $user->id)
-                    ->whereIn('state', [2, 6])
-                    ->where(function ($query) use ($currentMonth, $currentYear, $mesAnterior, $isGracePeriod) {
-                        $query->whereMonth('created_at', $currentMonth)->whereYear('created_at', $currentYear);
-                        if ($isGracePeriod) {
-                            $query->orWhere(function ($q) use ($mesAnterior) {
-                                $q->whereMonth('created_at', $mesAnterior->month)->whereYear('created_at', $mesAnterior->year);
-                            });
-                        }
-                    })
-                    ->exists();
-                if ($hasPayment) {
-                    $historicalChildrenActive[] = $childCode;
-                }
-            }
-        }
-
-        $allChildren = array_unique(array_merge($transactionalChildren, $historicalChildrenActive));
-
-        foreach ($allChildren as $child) {
+        // "Personas en red" representa toda la genealogía permanente. El
+        // estado de compra del mes pertenece al contador de activos y no debe
+        // cortar ramas completas ni ocultar usuarios inactivos.
+        $count = 0;
+        foreach ($this->directUserCodes($userCode) as $child) {
             $count++;
             $count += $this->countTotalNetworkRecursive($child, $visited);
         }
@@ -105,11 +98,13 @@ class NetworkTreeService
         return $count;
     }
 
-    public function buildDescendantTree($userCode, $currentLevel = 0, $maxLevel = 15)
+    public function buildDescendantTree($userCode, $currentLevel = 0, $maxLevel = 15, &$visited = [])
     {
-        if ($currentLevel >= $maxLevel) {
+        $normalized = strtoupper($userCode);
+        if ($currentLevel >= $maxLevel || isset($visited[$normalized])) {
             return null;
         }
+        $visited[$normalized] = true;
 
         $user = User::where('uuid', $userCode)->first();
 
@@ -118,44 +113,16 @@ class NetworkTreeService
             'user_name'      => $user ? $user->name : 'Usuario no encontrado',
             'email'          => $user ? $user->email : null,
             'level'          => $currentLevel,
+            'active'         => $user ? $user->active : false,
             'children' => [],
             'total_children' => 0
         ];
 
-        $transactionalChildren = PaymentOrderPoint::where('sponsor_code', $userCode)
-            ->where('type', PaymentOrderPoint::COMPRA)
-            ->where('state', true)
-            ->where('payment', 1)
-            ->orderBy('created_at', 'asc')
-            ->get();
-
-        foreach ($transactionalChildren as $child) {
-            $childNode = $this->buildDescendantTree($child->user_code, $currentLevel + 1, $maxLevel);
+        foreach ($this->directUserCodes($userCode) as $childCode) {
+            $childNode = $this->buildDescendantTree($childCode, $currentLevel + 1, $maxLevel, $visited);
             if ($childNode) {
-                $childNode['source'] = 'transactional';
+                $childNode['source'] = 'sponsor_relation';
                 $node['children'][]  = $childNode;
-            }
-        }
-
-        $historicalChildren = GuestsTokenUser::where('sponsor_user_code', $userCode)
-            ->where('state', true)
-            ->get();
-
-        foreach ($historicalChildren as $child) {
-            $exists = false;
-            foreach ($node['children'] as $existing) {
-                if ($existing['user_code'] === $child->guest_user_code) {
-                    $exists = true;
-                    break;
-                }
-            }
-
-            if (!$exists) {
-                $childNode = $this->buildDescendantTree($child->guest_user_code, $currentLevel + 1, $maxLevel);
-                if ($childNode) {
-                    $childNode['source'] = 'historical';
-                    $node['children'][]  = $childNode;
-                }
             }
         }
 
@@ -179,35 +146,21 @@ class NetworkTreeService
 
     public function loopTree(array $a_paymentOrderPoint, string $userCode)
     {
-        if (strtoupper($userCode) == 'DOSB') {
-            return $a_paymentOrderPoint;
-        }
+        $visited = collect($a_paymentOrderPoint)
+            ->pluck('user_code')
+            ->map(fn ($code) => strtoupper($code))
+            ->all();
 
-        $paymentOrderPoint = PaymentOrderPoint::select('user_code', 'sponsor_code')
-            ->where("user_code", $userCode)
-            ->whereIn("type", [PaymentOrderPoint::COMPRA, PaymentOrderPoint::PATROCINIO])
-            ->where("state", true)
-            ->orderBy('created_at', 'asc')
-            ->first();
+        while (strtoupper($userCode) !== 'DOSB' && !in_array(strtoupper($userCode), $visited, true)) {
+            $visited[] = strtoupper($userCode);
+            $sponsorCode = $this->sponsorCode($userCode);
+            if (!$sponsorCode || strcasecmp($sponsorCode, $userCode) === 0) break;
 
-        if ($paymentOrderPoint == null) {
-            $guest = GuestsTokenUser::select('guest_user_code as user_code', 'sponsor_user_code as sponsor_code')
-                ->where("guest_user_code", $userCode)
-                ->where("state", true)
-                ->first();
-
-            if ($guest) {
-                $paymentOrderPoint = $guest;
-            }
-        }
-
-        if ($paymentOrderPoint != null && !empty($paymentOrderPoint->sponsor_code)) {
-            if ($paymentOrderPoint->sponsor_code == $userCode) {
-                return $a_paymentOrderPoint;
-            }
-
-            array_push($a_paymentOrderPoint, $paymentOrderPoint);
-            return $this->loopTree($a_paymentOrderPoint, $paymentOrderPoint->sponsor_code);
+            $a_paymentOrderPoint[] = (object) [
+                'user_code' => $userCode,
+                'sponsor_code' => $sponsorCode,
+            ];
+            $userCode = $sponsorCode;
         }
 
         return $a_paymentOrderPoint;

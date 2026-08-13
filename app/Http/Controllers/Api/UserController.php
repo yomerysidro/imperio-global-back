@@ -35,6 +35,7 @@ use Illuminate\Support\Str;
 use App\Mail\InivitedSponsorUser;
 use App\Services\Core\CodeGenerator;
 use App\Models\VerificationCodeUser;
+use App\Models\SponsorRelation;
 
 class UserController extends BaseController
 {
@@ -101,7 +102,7 @@ class UserController extends BaseController
             $paymentOrderPoints = PaymentOrderPoint::where('state', 1)
                 ->whereMonth('created_at', $mesFiltro)
                 ->whereYear('created_at', $anioFiltro)
-                ->whereIn('type', ['B', 'G', 'R', 'P', 'S', 'I'])
+                ->whereIn('type', ['B', 'G', 'R', 'RS', 'P', 'PS', 'S', 'I'])
                 ->get();
 
             $paymentProductOrderPoints = PaymentProductOrderPoint::where("user_id", $user->id)
@@ -116,11 +117,11 @@ class UserController extends BaseController
 
             $puntosPersonales = $paymentOrderPointsUser->where('type', 'B')->sum('point');
             $puntosRed        = $paymentOrderPointsUser->where('type', 'G')->sum('point');
-            $puntosResiduales = $paymentOrderPointsUser->where('type', 'R')->sum('point');
-            $gananciaPatrocinio = $paymentOrderPointsUser->whereIn('type', ['P', 'S'])->sum('point');
+            $puntosResiduales = $paymentOrderPointsUser->whereIn('type', ['R', 'RS'])->sum('point');
+            $gananciaPatrocinio = $paymentOrderPointsUser->whereIn('type', ['P', 'PS', 'S'])->sum('point');
             $puntosInfinito   = $paymentOrderPointsUser->where('type', 'I')->sum('point');
 
-            $totalPoints = $puntosPersonales + $puntosRed + $puntosResiduales;
+            $totalPoints = $puntosPersonales + $puntosRed;
 
             // 🔥 CONSTRUIR OBJETO DE PUNTOS
             $user->points = (object) [
@@ -246,7 +247,7 @@ class UserController extends BaseController
         $paymentOrderPoints = PaymentOrderPoint::where('state', 1) // 👈 state = 1 (activo)
             ->whereMonth('created_at', $mesFiltro)
             ->whereYear('created_at', $anioFiltro)
-            ->whereIn('type', ['B', 'G', 'R', 'P', 'S', 'I']) // 👈 TODOS LOS TIPOS
+            ->whereIn('type', ['B', 'G', 'R', 'RS', 'P', 'PS', 'S', 'I']) // TODOS LOS TIPOS
             ->get();
 
         // 🔥 CORRECCIÓN 2: FILTRAR SOLO LOS PUNTOS DEL USUARIO ACTUAL
@@ -257,21 +258,21 @@ class UserController extends BaseController
         // 🔥 CORRECCIÓN 3: CALCULAR PUNTOS POR TIPO (Todos los tipos)
         $puntosPersonales = $paymentOrderPointsUser->where('type', 'B')->sum('point'); // COMPRA
         $puntosRed        = $paymentOrderPointsUser->where('type', 'G')->sum('point'); // GRUPAL
-        $puntosResiduales = $paymentOrderPointsUser->where('type', 'R')->sum('point'); // RESIDUAL
-        $gananciaPatrocinio = $paymentOrderPointsUser->whereIn('type', ['P', 'S'])->sum('point'); // PATROCINIO (P y S)
+        $puntosResiduales = $paymentOrderPointsUser->whereIn('type', ['R', 'RS'])->sum('point');
+        $gananciaPatrocinio = $paymentOrderPointsUser->whereIn('type', ['P', 'PS', 'S'])->sum('point');
         $puntosInfinito   = $paymentOrderPointsUser->where('type', 'I')->sum('point'); // INFINITO
 
         // 🔥 CORRECCIÓN 4: TOTAL DE PUNTOS PARA RANGO = COMPRA + GRUPAL + RESIDUAL
-        $totalPoints = $puntosPersonales + $puntosRed + $puntosResiduales;
+        // El volumen para rango contiene solamente puntos de compra y de red.
+        // Las comisiones son dinero y nunca incrementan el volumen grupal.
+        $totalPoints = $puntosPersonales + $puntosRed;
+        $totalComisiones = $gananciaPatrocinio + $puntosResiduales + $puntosInfinito;
 
         $legacyTokens = GuestsTokenUser::where('state', true)->get();
 
         // 🔥 CORRECCIÓN 5: LÓGICA PARA DOSB (CORPORATIVO)
         if (strtoupper($userModel->uuid) == 'DOSB') {
-            $directosLegacy = GuestsTokenUser::where('sponsor_user_code', $userModel->uuid)
-                ->where('state', true)
-                ->pluck('guest_user_code')
-                ->toArray();
+            $directosLegacy = $this->networkTreeService->directUserCodes($userModel->uuid);
 
             $userModel->directos = count($directosLegacy);
             $activos = 0;
@@ -283,52 +284,65 @@ class UserController extends BaseController
                         ->whereMonth('created_at', $now->month)
                         ->whereYear('created_at', $now->year)
                         ->exists();
-                    if ($hasPayment) $activos++;
+                    $hasProduct = PaymentProductOrder::where('user_id', $user->id)
+                        ->whereIn('state', [PaymentProductOrder::PAGADO, PaymentProductOrder::ENVIADO, PaymentProductOrder::TERMINADO])
+                        ->whereMonth('created_at', $now->month)
+                        ->whereYear('created_at', $now->year)
+                        ->exists();
+                    if ($hasPayment || $hasProduct) $activos++;
                 }
             }
-            $userModel->activos   = $activos;
-            $userModel->red_total = $this->networkTreeService->countTotalNetworkRecursive('DOSB');
+            $networkUsers = $this->networkTreeService->getAllNetworkUsers('DOSB');
+            $descendantCodes = array_values(array_filter(
+                $networkUsers,
+                fn ($code) => strcasecmp($code, 'DOSB') !== 0
+            ));
 
-            $networkUsers   = $this->networkTreeService->getAllNetworkUsers('DOSB');
-            $totalPointsRed = PaymentOrderPoint::whereIn('user_code', $networkUsers)
-                ->where('state', 1)
-                ->sum('point');
+            $historicalGroupVolume = DB::query()->fromSub(
+                PaymentOrderPoint::select('payment_order_id', DB::raw('MAX(point) as point'))
+                    ->whereIn('user_code', $descendantCodes)
+                    ->where('type', PaymentOrderPoint::COMPRA)
+                    ->groupBy('payment_order_id'),
+                'network_purchases'
+            )->sum('point');
 
-            if ($totalPointsRed > 0) {
-                $totalPoints = (int) $totalPointsRed;
-            } else {
-                $totalPoints = count($directosLegacy) * 100;
-            }
+            $monthlyGroupVolume = DB::query()->fromSub(
+                PaymentOrderPoint::select('payment_order_id', DB::raw('MAX(point) as point'))
+                    ->whereIn('user_code', $descendantCodes)
+                    ->where('type', PaymentOrderPoint::COMPRA)
+                    ->whereMonth('created_at', $mesFiltro)
+                    ->whereYear('created_at', $anioFiltro)
+                    ->groupBy('payment_order_id'),
+                'monthly_network_purchases'
+            )->sum('point');
+
+            $userModel->activos = $activos;
+            $userModel->red_total = count($descendantCodes);
+            $userModel->personas_red = count($descendantCodes);
+            $userModel->volumen_grupal_historico = (float) $historicalGroupVolume;
+            $userModel->volumen_grupal_mensual = (float) $monthlyGroupVolume;
+            $totalPoints = (float) $monthlyGroupVolume;
 
             $userModel->points = (object) [
-                'patrocinio'         => 0,
-                'residual'           => 0,
-                'compra'             => (object) ['total_puntos' => $totalPoints],
-                'pointGroup'         => 0,
-                'personal'           => $totalPoints,
-                'infinito'           => 0,
+                'patrocinio'         => (float) $gananciaPatrocinio,
+                'residual'           => (float) $puntosResiduales,
+                'compra'             => (object) ['total_puntos' => 0],
+                'pointGroup'         => (float) $monthlyGroupVolume,
+                'pointGroupMonthly'  => (float) $monthlyGroupVolume,
+                'personal'           => 0,
+                'infinito'           => (float) $puntosInfinito,
                 'pointAfiliado'      => 0,
                 'personalGlobal'     => 0,
                 'patrocinioRequest'  => 0,
                 'patrocinioServicio' => 0,
                 'residualServicio'   => 0,
-                'legacy_bonus'       => count($directosLegacy) * 100
+                'legacy_bonus'       => 0,
+                'total_general'      => (float) $monthlyGroupVolume,
+                'total_comisiones'   => (float) $totalComisiones
             ];
         } else {
             // 🔥 LÓGICA PARA USUARIOS NORMALES
-            $directosPuntos = PaymentOrderPoint::where('sponsor_code', $userModel->uuid)
-                ->where('type', 'B')
-                ->where('state', 1)
-                ->where('payment', 1)
-                ->pluck('user_code')
-                ->toArray();
-
-            $directosLegacy = GuestsTokenUser::where('sponsor_user_code', $userModel->uuid)
-                ->where('state', true)
-                ->pluck('guest_user_code')
-                ->toArray();
-
-            $todosDirectos       = array_unique(array_merge($directosPuntos, $directosLegacy));
+            $todosDirectos       = $this->networkTreeService->directUserCodes($userModel->uuid);
             $userModel->directos = count($todosDirectos);
 
             $activos = 0;
@@ -352,6 +366,7 @@ class UserController extends BaseController
             }
             $userModel->activos = $activos;
             $userModel->red_total = $this->networkTreeService->countTotalNetworkRecursive($userModel->uuid);
+            $userModel->personas_red = $userModel->red_total;
 
             // 🔥 CORRECCIÓN: OBJETO DE PUNTOS CON TODOS LOS TIPOS
             $userModel->points = (object) [
@@ -369,7 +384,8 @@ class UserController extends BaseController
                 'puntos_personales'   => $puntosPersonales,
                 'puntos_red'          => $puntosRed,
                 'ganancia_patrocinio' => $gananciaPatrocinio,
-                'total_general'       => $totalPoints
+                'total_general'       => $totalPoints,
+                'total_comisiones'    => $totalComisiones
             ];
         }
 
@@ -413,10 +429,14 @@ class UserController extends BaseController
             $userModel->range = null;
         }
 
-        $userPoints = $paymentOrderPointsUser->values()->toArray();
-
         $responsePayload                    = $userModel->toArray();
-        $responsePayload['points']          = $userPoints;
+        // `points` conserva el resumen tipado que consume el home. Exponer los
+        // movimientos aparte evita sumar comisiones R/P/I como volumen B/G.
+        $responsePayload['point_records'] = $paymentOrderPointsUser->values()->toArray();
+        $responsePayload['volume_records'] = $paymentOrderPointsUser
+            ->whereIn('type', ['B', 'G'])->values()->toArray();
+        $responsePayload['commission_records'] = $paymentOrderPointsUser
+            ->whereIn('type', ['P', 'PS', 'S', 'R', 'RS', 'I'])->values()->toArray();
         $responsePayload['legacy_count']    = $legacyTokens->count();
         $responsePayload['network_summary'] = [
             'total_directs'      => $userModel->directos ?? 0,
@@ -566,10 +586,12 @@ class UserController extends BaseController
         $userIds = collect($userList->items())->pluck('uuid')->toArray();
 
         // 🔥 Sumar los bonos históricos (P, S, R, RS) - esto es para el frontend como dato adicional
-        $historicalBonuses = PaymentOrderPoint::select('sponsor_code', DB::raw('SUM(point) as total_bono'))
-            ->whereIn('sponsor_code', $userIds)->where('state', 1)
-            ->whereIn('type', [PaymentOrderPoint::PATROCINIO, PaymentOrderPoint::PATROCINIO_SERVICIO, PaymentOrderPoint::RESIDUAL, PaymentOrderPoint::RESIDUAL_SERVICIO])
-            ->groupBy('sponsor_code')->pluck('total_bono', 'sponsor_code');
+        $historicalBonuses = PaymentOrderPoint::select('user_code', DB::raw('SUM(point) as total_bono'))
+            ->whereIn('user_code', $userIds)->where('state', 1)
+            ->whereIn('type', [PaymentOrderPoint::PATROCINIO, PaymentOrderPoint::PATROCINIO_SERVICIO, PaymentOrderPoint::RESIDUAL, PaymentOrderPoint::RESIDUAL_SERVICIO, PaymentOrderPoint::INFINITO])
+            ->groupBy('user_code')->pluck('total_bono', 'user_code');
+
+        $activeRanges = Range::where('state', true)->orderBy('points')->get();
 
         foreach ($userList as $key => $user) {
             $servicePayment = PaymentLog::with(['paymentOrder.pack', 'paymentOrder.sponsor.file'])
@@ -621,6 +643,38 @@ class UserController extends BaseController
 
             // 🔥 ASIGNAR EL OBJETO COMPLETO AL USUARIO
             $userList[$key]->points = $userPoints;
+
+            // El rango mostrado debe derivarse del volumen vigente, no depender
+            // exclusivamente de un RangeUser creado previamente por un proceso batch.
+            $directCount = count($this->networkTreeService->directUserCodes($user->uuid));
+            $currentRange = null;
+            foreach ($activeRanges as $candidate) {
+                if ((float) $candidate->points <= (float) $userPoints->total_general
+                    && (int) $candidate->childs <= $directCount) {
+                    $currentRange = $candidate;
+                }
+            }
+
+            $nextRange = $activeRanges->first(function ($candidate) use ($currentRange) {
+                return !$currentRange || (int) $candidate->order > (int) $currentRange->order;
+            });
+            $progressTarget = $nextRange ?: $currentRange;
+            $progress = $progressTarget && (float) $progressTarget->points > 0
+                ? min(100, round(((float) $userPoints->total_general / (float) $progressTarget->points) * 100, 2))
+                : 0;
+
+            if ($currentRange) {
+                $rangeView = new RangeUser();
+                $rangeView->setRelation('range', $currentRange);
+                $userList[$key]->setRelation('range', $rangeView);
+            } else {
+                $userList[$key]->setRelation('range', null);
+            }
+            $userList[$key]->next_range = $nextRange;
+            $userList[$key]->range_progress = $progress;
+            $userList[$key]->points_to_next_range = $nextRange
+                ? max(0, (float) $nextRange->points - (float) $userPoints->total_general)
+                : 0;
 
             // 🔥 Agregar los bonos históricos
             $userList[$key]->bonos_totales_historico = $historicalBonuses->get($user->uuid, 0);
@@ -783,7 +837,7 @@ class UserController extends BaseController
                     }
                 );
 
-                $totalPoints  = $calculatorPoint->patrocinio + $calculatorPoint->residual + $calculatorPoint->compra->total_puntos + $calculatorPoint->pointGroup + $calculatorPoint->personal;
+                $totalPoints  = $calculatorPoint->personal + $calculatorPoint->pointGroup;
                 $rangeCurrent = null;
                 foreach ($ranges as $key => $range) {
                     if ($range->point <= $totalPoints && $range->childs == count($_paymentOrderPoints)) {
@@ -1154,6 +1208,13 @@ class UserController extends BaseController
                 'state'             => $dataBody->accept
             ]);
 
+            if ($dataBody->accept && strcasecmp($inviteUser->sponsor_user_code, $userModel->uuid) !== 0) {
+                SponsorRelation::updateOrCreate(
+                    ['user_code' => $userModel->uuid],
+                    ['sponsor_code' => $inviteUser->sponsor_user_code, 'source' => 'invitation', 'state' => true]
+                );
+            }
+
             InviteUser::where('token', '=', $dataBody->token)->update(["state" => false]);
 
             DB::commit();
@@ -1194,6 +1255,9 @@ class UserController extends BaseController
             GuestsTokenUser::where("guest_user_code", $userModel->uuid)
                 ->where("state", true)
                 ->update(["state" => false]);
+            SponsorRelation::where('user_code', $userModel->uuid)
+                ->where('source', 'invitation')
+                ->update(['state' => false]);
 
             DB::commit();
             return $this->sendResponse(1, '');

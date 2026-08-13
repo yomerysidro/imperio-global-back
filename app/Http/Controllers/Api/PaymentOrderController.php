@@ -22,6 +22,7 @@ use App\Models\PaymentProductOrder;
 use App\Models\PaymentProductOrderPoint;
 use App\Services\Flow\FlowPayment;
 use App\Services\Core\Calculator;
+use App\Services\Core\CommissionService;
 
 
 use Exception;
@@ -996,6 +997,9 @@ class PaymentOrderController extends BaseController
 
     private function confirmPoint($paymentOrder, $userCurrent, $packCurrent)
     {
+        (new CommissionService())->confirmPoint($paymentOrder, $userCurrent, $packCurrent);
+        return;
+
 
         $paymentLogsCount = PaymentLog::where("user_id", $userCurrent->id)
             ->whereIn("state", [PaymentLog::TERMINADO, PaymentLog::PAGADO])->count();
@@ -1182,7 +1186,7 @@ class PaymentOrderController extends BaseController
         $userCurrent = User::find($userId);
 
         $calculatorPoint = $this->calculator->points($userCurrent->uuid, $paymentOrderPoints, $paymentProductOrderPoints);
-        $totalPoints = $calculatorPoint->patrocinio + $calculatorPoint->residual + $calculatorPoint->compra->total_puntos + $calculatorPoint->pointGroup + $calculatorPoint->personal;
+        $totalPoints = $calculatorPoint->personal + $calculatorPoint->pointGroup;
         $maxPointsProduct = Option::where("option_key", "max_points_product")->first();
 
         $paymentLog = PaymentLog::with(['paymentOrder.pack'])

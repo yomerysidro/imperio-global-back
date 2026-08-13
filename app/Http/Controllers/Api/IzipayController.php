@@ -19,6 +19,7 @@ use App\Models\LogPayment;
 use App\Models\PaymentOrderPoint;
 use App\Models\SponsorshipPoint;
 use App\Models\ResidualPoint;
+use App\Services\Core\CommissionService;
 
 use Illuminate\Support\Facades\Auth;
 
@@ -172,6 +173,10 @@ class IzipayController extends BaseController
                 return $this->sendError( "El plan no existe" );
             }
 
+            // Motor MLM único. El bloque histórico se conserva abajo solo como referencia.
+            (new CommissionService())->confirmPoint($paymentOrder, $userCurrent, $packCurrent);
+
+            if (false) {
             // punto de compra
             PaymentOrderPoint::create(array(
                 'payment_order_id' => $paymentOrder->id,
@@ -257,6 +262,8 @@ class IzipayController extends BaseController
                         'type' => 'R'
                     ));
                 }
+
+            }
 
             }
 

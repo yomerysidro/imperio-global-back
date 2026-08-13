@@ -31,6 +31,7 @@ use App\Models\SponsorshipPoint;
 use App\Models\ResidualPoint;
 
 use App\Services\Core\FileUpload;
+use App\Services\Core\CommissionService;
 
 
 class PaymentProductOrderController extends BaseController
@@ -714,8 +715,6 @@ class PaymentProductOrderController extends BaseController
                         ->orderBy('created_at', 'desc')
                         ->first();
 
-                        $this->confirmPoint($paymentOrder , $userCurrent , $__paymentLog->paymentOrder->pack, true);
-
                         $option = Option::where("option_key", 'reactive_point')->first();
 
                         // desabilitado - 15-06
@@ -1133,8 +1132,6 @@ class PaymentProductOrderController extends BaseController
                         ->orderBy('created_at', 'desc')
                         ->first();
 
-                        $this->confirmPoint($paymentOrder , $userCurrent , $__paymentLog->paymentOrder->pack, true);
-
                         $option = Option::where("option_key", 'reactive_point')->first();
 
                         // desabilitado - 15-06
@@ -1205,6 +1202,9 @@ class PaymentProductOrderController extends BaseController
 
     private function confirmPointAfiliado( $userCurrent, $points , $totalPoints)
     {
+        (new CommissionService())->confirmPointAfiliado($userCurrent, $points);
+        return;
+
         $paymentLog = PaymentLog::where( "user_id" , $userCurrent->id )
                 ->whereIn("state" , [PaymentLog::TERMINADO, PaymentLog::PAGADO] )->orderBy('created_at', 'desc')->first();
         if( $paymentLog != null ){
@@ -1272,6 +1272,9 @@ class PaymentProductOrderController extends BaseController
 
     private function confirmPoint( $paymentOrder , $userCurrent , $packCurrent, $reactiveAdmin = false)
     {
+        (new CommissionService())->confirmPoint($paymentOrder, $userCurrent, $packCurrent, $reactiveAdmin);
+        return;
+
 
         $paymentLogsCount = PaymentLog::where( "user_id" , $userCurrent->id )
                 ->whereIn("state" , [PaymentLog::TERMINADO, PaymentLog::PAGADO] )->count();

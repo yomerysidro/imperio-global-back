@@ -36,6 +36,7 @@ use App\Mail\UsersPointExcel;
 use App\Mail\UserPointActive;
 use App\Http\Resources\PaginationCollection;
 use App\Models\GuestsTokenUser;
+use App\Models\SponsorRelation;
 use App\Services\Core\CommissionService as CoreCommissionService;
 
 class FinanceController extends BaseController
@@ -73,15 +74,17 @@ class FinanceController extends BaseController
 
             foreach ($paymentOrderPoints as $key => $paymentOrderPoint) {
                 if ($paymentOrderPoint->paymentOrder->paymentLog->state        == PaymentLog::PAGADO) {
-                    if ($paymentOrderPoint->type                               == PaymentOrderPoint::PATROCINIO) $patrocinioUserActive += $paymentOrderPoint->point;
-                    else if ($paymentOrderPoint->type                          == PaymentOrderPoint::RESIDUAL) $residualUserActive += $paymentOrderPoint->point;
+                    if (in_array($paymentOrderPoint->type, [PaymentOrderPoint::PATROCINIO, PaymentOrderPoint::PATROCINIO_SERVICIO, 'S'])) $patrocinioUserActive += $paymentOrderPoint->point;
+                    else if (in_array($paymentOrderPoint->type, [PaymentOrderPoint::RESIDUAL, PaymentOrderPoint::RESIDUAL_SERVICIO])) $residualUserActive += $paymentOrderPoint->point;
                 } else if ($paymentOrderPoint->paymentOrder->paymentLog->state == PaymentLog::TERMINADO) {
-                    if ($paymentOrderPoint->type                               == PaymentOrderPoint::PATROCINIO) $patrocinioUserInactive += $paymentOrderPoint->point;
-                    else if ($paymentOrderPoint->type                          == PaymentOrderPoint::RESIDUAL) $residualUserInactive += $paymentOrderPoint->point;
+                    if (in_array($paymentOrderPoint->type, [PaymentOrderPoint::PATROCINIO, PaymentOrderPoint::PATROCINIO_SERVICIO, 'S'])) $patrocinioUserInactive += $paymentOrderPoint->point;
+                    else if (in_array($paymentOrderPoint->type, [PaymentOrderPoint::RESIDUAL, PaymentOrderPoint::RESIDUAL_SERVICIO])) $residualUserInactive += $paymentOrderPoint->point;
                 }
 
                 if ($paymentOrderPoint->type == PaymentOrderPoint::INFINITO) $infinityUser += $paymentOrderPoint->point;
-                $totalPoint += $paymentOrderPoint->point;
+                if (in_array($paymentOrderPoint->type, ['P', 'PS', 'S', 'R', 'RS', 'I'])) {
+                    $totalPoint += $paymentOrderPoint->point;
+                }
             }
 
             $data = [
@@ -162,8 +165,12 @@ class FinanceController extends BaseController
         $year  = $date->format('Y');
 
         $userList                  = User::where("is_admin", false)->get();
-        $paymentOrderPoints        = PaymentOrderPoint::where('state', true)->get();
-        $paymentProductOrderPoints = PaymentProductOrderPoint::where("state", true)->get();
+        $paymentOrderPoints = PaymentOrderPoint::whereMonth('created_at', $month)
+            ->whereYear('created_at', $year)
+            ->get();
+        $paymentProductOrderPoints = PaymentProductOrderPoint::whereMonth('created_at', $month)
+            ->whereYear('created_at', $year)
+            ->get();
         $ranges                    = Range::where("state", true)->orderBy('points', 'asc')->get();
 
         $excelBody = [];
@@ -181,16 +188,12 @@ class FinanceController extends BaseController
                 $paymentProductOrderPoints->where('user_id', $user->id)
             );
 
-            $totalPoints = $calculator->patrocinio + $calculator->residual + $calculator->compra->total_puntos + $calculator->pointGroup + $calculator->personal;
+            $totalPoints = $calculator->personal + $calculator->pointGroup;
 
             $rangeCurrent = null;
-            $directs      = PaymentOrderPoint::where('sponsor_code', $user->uuid)
-                ->where('type', PaymentOrderPoint::COMPRA)
-                ->where('state', true)
-                ->where('payment', 1)
-                ->count();
+            $directs = count($this->networkTreeService->directUserCodes($user->uuid));
 
-            foreach ($ranges as $range) {
+            foreach ($ranges->sortByDesc('points') as $range) {
                 if ($range->points <= $totalPoints && $range->childs <= $directs) {
                     $rangeCurrent    = $range;
                     break;
@@ -543,8 +546,14 @@ class FinanceController extends BaseController
             PaymentLog::with(['paymentOrder'])->where('state', PaymentLog::PAGADO)
                 ->update(["state" => PaymentLog::TERMINADO]);
 
-            PaymentOrderPoint::where('state', true)->update(["state"        => false]);
-            PaymentProductOrderPoint::where("state", true)->update(["state" => false]);
+            PaymentOrderPoint::where('state', true)
+                ->whereMonth('created_at', $fechaActual->month)
+                ->whereYear('created_at', $fechaActual->year)
+                ->update(["state" => false]);
+            PaymentProductOrderPoint::where("state", true)
+                ->whereMonth('created_at', $fechaActual->month)
+                ->whereYear('created_at', $fechaActual->year)
+                ->update(["state" => false]);
             RangeUser::where("status", true)->update(["status"              => false]);
 
             DB::commit();
@@ -799,8 +808,6 @@ class FinanceController extends BaseController
                         "token"        => $orderId2
                     ]);
 
-                    $this->commissionService->confirmPoint($_paymentOrder, $userUpdated, $paymentLog->paymentOrder->pack, true);
-
                     $_paymentLog = PaymentLog::create([
                         'payment_order_id' => $_paymentOrder->id,
                         "confirm"          => true,
@@ -916,8 +923,8 @@ class FinanceController extends BaseController
     public function changeSponsor(Request $request)
     {
         $validator = Validator::make($request->all(), [
-            'userCode'    => 'required',
-            'sponsorCode' => 'required',
+            'userCode'    => 'required|exists:users,uuid',
+            'sponsorCode' => 'required|exists:users,uuid|different:userCode',
         ]);
 
         if ($validator->fails()) return $this->sendError('Error de validacion.', $validator->errors(), 422);
@@ -925,6 +932,11 @@ class FinanceController extends BaseController
         try {
             $dataBody    = (object) $request->all();
             $userCurrent = User::where("uuid", 'like', $dataBody->userCode)->first();
+
+            $descendants = $this->networkTreeService->getAllNetworkUsers($userCurrent->uuid);
+            if (collect($descendants)->contains(fn ($code) => strcasecmp($code, $dataBody->sponsorCode) === 0)) {
+                return $this->sendError('El patrocinador seleccionado pertenece a la red descendente del usuario.');
+            }
 
             $paymentOrderPoint = PaymentOrderPoint::where("sponsor_code", $userCurrent->uuid)
                 ->where("type", PaymentOrderPoint::COMPRA)
@@ -948,6 +960,10 @@ class FinanceController extends BaseController
             ]);
 
             PaymentOrderPoint::where("user_id", $userCurrent->id)->update(["sponsor_code" => $dataBody->sponsorCode]);
+            SponsorRelation::updateOrCreate(
+                ['user_code' => $userCurrent->uuid],
+                ['sponsor_code' => $dataBody->sponsorCode, 'source' => 'manual', 'state' => true]
+            );
 
             DB::commit();
             return $this->sendResponse(1, '');
@@ -967,11 +983,9 @@ class FinanceController extends BaseController
                 return $this->sendError("Usuario no encontrado");
             }
 
-            $directosLegacy = GuestsTokenUser::where('sponsor_user_code', 'DOSB')
-                ->where('state', true)
-                ->get();
-
-            $totalDirectos = $directosLegacy->count();
+            $directCodes = $this->networkTreeService->directUserCodes('DOSB');
+            $directosLegacy = collect($directCodes)->map(fn ($code) => (object) ['guest_user_code' => $code]);
+            $totalDirectos = count($directCodes);
 
             $now     = Carbon::now();
             $activos = 0;
@@ -983,16 +997,39 @@ class FinanceController extends BaseController
                         ->whereMonth('created_at', $now->month)
                         ->whereYear('created_at', $now->year)
                         ->exists();
-                    if ($hasPayment) $activos++;
+                    $hasProduct = PaymentProductOrder::where('user_id', $user->id)
+                        ->whereIn('state', [PaymentProductOrder::PAGADO, PaymentProductOrder::ENVIADO, PaymentProductOrder::TERMINADO])
+                        ->whereMonth('created_at', $now->month)
+                        ->whereYear('created_at', $now->year)
+                        ->exists();
+                    if ($hasPayment || $hasProduct) $activos++;
                 }
             }
 
             // Usando el servicio inyectado
-            $totalRed = $this->networkTreeService->countTotalNetworkRecursive('DOSB');
+            $networkCodes = $this->networkTreeService->getAllNetworkUsers('DOSB');
+            $descendantCodes = array_values(array_filter($networkCodes, fn ($code) => strcasecmp($code, 'DOSB') !== 0));
+            $totalRed = count($descendantCodes);
             $tree     = $this->networkTreeService->buildDescendantTree('DOSB', 0, 15);
 
-            $puntosPorInvitado = 100;
-            $totalPuntos       = $totalDirectos * $puntosPorInvitado;
+            $historicalGroupVolume = DB::query()->fromSub(
+                PaymentOrderPoint::select('payment_order_id', DB::raw('MAX(point) as point'))
+                    ->whereIn('user_code', $descendantCodes)
+                    ->where('type', PaymentOrderPoint::COMPRA)
+                    ->groupBy('payment_order_id'),
+                'network_purchases'
+            )->sum('point');
+            $monthlyGroupVolume = DB::query()->fromSub(
+                PaymentOrderPoint::select('payment_order_id', DB::raw('MAX(point) as point'))
+                    ->whereIn('user_code', $descendantCodes)
+                    ->where('type', PaymentOrderPoint::COMPRA)
+                    ->whereMonth('created_at', now()->month)
+                    ->whereYear('created_at', now()->year)
+                    ->groupBy('payment_order_id'),
+                'monthly_network_purchases'
+            )->sum('point');
+            $totalPuntos = (float) $monthlyGroupVolume;
+            $puntosPorInvitado = 0;
 
             $userModel->directos    = $totalDirectos;
             $userModel->activos     = $activos;
@@ -1001,16 +1038,20 @@ class FinanceController extends BaseController
             $userModel->points      = (object) [
                 'patrocinio'         => 0,
                 'residual'           => 0,
-                'compra'             => (object) ['total_puntos' => $totalPuntos],
-                'pointGroup'         => 0,
-                'personal'           => $totalPuntos,
+                'compra'             => (object) ['total_puntos' => 0],
+                'pointGroup'         => (float) $totalPuntos,
+                'pointGroupMonthly'  => (float) $monthlyGroupVolume,
+                'pointGroupHistorical' => (float) $historicalGroupVolume,
+                'personal'           => 0,
                 'infinito'           => 0,
                 'pointAfiliado'      => 0,
                 'personalGlobal'     => 0,
                 'patrocinioRequest'  => 0,
                 'patrocinioServicio' => 0,
                 'residualServicio'   => 0,
-                'legacy_bonus'       => $totalPuntos
+                'legacy_bonus'       => 0,
+                'total_general'      => (float) $monthlyGroupVolume,
+                'total_comisiones'   => 0
             ];
 
             return $this->sendResponse([
@@ -1031,6 +1072,8 @@ class FinanceController extends BaseController
                     'activos'             => $activos,
                     'red_total'           => $totalRed,
                     'puntos_totales'      => $totalPuntos,
+                    'volumen_grupal_mensual' => (float) $monthlyGroupVolume,
+                    'volumen_grupal_historico' => (float) $historicalGroupVolume,
                     'puntos_por_invitado' => $puntosPorInvitado,
                     'total_invitados'     => $totalDirectos,
                 ],
