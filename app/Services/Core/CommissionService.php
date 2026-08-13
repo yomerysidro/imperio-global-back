@@ -11,12 +11,10 @@ use App\Models\ResidualPoint;
 use Illuminate\Support\Facades\Cache;
 use App\Models\SponsorRelation;
 use App\Models\PaymentProductOrder;
+use App\Models\CommissionRule;
 
 class CommissionService
 {
-    private const MAX_SPONSORSHIP_LEVEL = 5;
-    private const MAX_NETWORK_LEVEL = 15;
-
     private $networkTreeService;
 
     public function __construct()
@@ -75,7 +73,8 @@ class CommissionService
             : PaymentOrderPoint::PATROCINIO_SERVICIO;
 
         $visited = [];
-        while (!empty($currentSponsorCode) && $level <= self::MAX_NETWORK_LEVEL) {
+        $maxNetworkLevel = (int) CommissionRule::where('state', true)->max('level');
+        while (!empty($currentSponsorCode) && $level <= $maxNetworkLevel) {
             $normalizedSponsor = strtoupper($currentSponsorCode);
             if (isset($visited[$normalizedSponsor])) break;
             $visited[$normalizedSponsor] = true;
@@ -147,14 +146,14 @@ class CommissionService
                 ]);
             }
 
-            if ($debeGenerarBono && $level <= self::MAX_SPONSORSHIP_LEVEL && $sponsorPack) {
+            if ($debeGenerarBono && $sponsorPack) {
                 // El porcentaje corresponde al paquete que originó la afiliación,
                 // no al paquete personal del beneficiario.
-                $sponsorshipConfig = SponsorshipPoint::where('pack_id', $paymentOrder->pack_id)->first();
+                $sponsorshipConfig = CommissionRule::where('bonus_type', CommissionRule::SPONSORSHIP)
+                    ->where('pack_id', $paymentOrder->pack_id)->where('level', $level)->where('state', true)->first();
 
                 if ($sponsorshipConfig) {
-                    $field   = 'level' . $level;
-                    $percent = floatval(str_replace(',', '.', $sponsorshipConfig->$field ?? 0));
+                    $percent = (float) $sponsorshipConfig->percentage;
 
                     if ($percent > 0) {
                         $montoDinero = round(($puntosBaseNuevoSocio * $percent) / 100, 2);
@@ -191,19 +190,23 @@ class CommissionService
         Cache::forget('existing_user_uuids');
     }
 
-    public function confirmPointAfiliado($userCurrent, $points)
+    public function confirmPointAfiliado($userCurrent, $points, $manualReactivationId = null, $paymentOrderId = null): array
 {
-    $paymentLog = PaymentLog::where("user_id", $userCurrent->id)
-        ->whereIn("state", [PaymentLog::TERMINADO, PaymentLog::PAGADO])->orderBy('created_at', 'desc')->first();
-        
-    if ($paymentLog != null) {
-        $paymentLogsCount = PaymentLog::where("user_id", $userCurrent->id)
-            ->whereIn("state", [PaymentLog::TERMINADO, PaymentLog::PAGADO])->count();
+    $summary = ['generated_count' => 0, 'generated_amount' => 0.0, 'blocked' => []];
+    if (!$paymentOrderId) {
+        $paymentOrderId = PaymentLog::where('user_id', $userCurrent->id)
+            ->whereIn('state', [PaymentLog::TERMINADO, PaymentLog::PAGADO])
+            ->latest('created_at')->value('payment_order_id');
+    }
+    if (!$paymentOrderId) {
+        $summary['blocked'][] = ['reason' => 'missing_payment_order'];
+        return $summary;
+    }
 
-        if ($paymentLogsCount > 1) {
             // 🔥 OBTENER EL ÁRBOL COMPLETO DEL USUARIO (línea ascendente)
             $_paymentOrderPoints = $this->networkTreeService->loopTree([], $userCurrent->uuid);
-            $residualConfig      = ResidualPoint::first();
+            $maxResidualLevel = (int) CommissionRule::where('bonus_type', CommissionRule::RESIDUAL)
+                ->where('state', true)->max('level');
             $countLevel          = 0;
 
             // 🔥 RECORRER EL ÁRBOL Y ASIGNAR RESIDUALES (MÁXIMO 7 NIVELES)
@@ -212,16 +215,22 @@ class CommissionService
                 $countLevel++;
                 
                 // Límite máximo: 7 niveles (según tu tabla)
-                if ($countLevel > 7) break;
+                if ($countLevel > $maxResidualLevel) break;
 
                 $point = 0;
                 // Porcentajes exactos según tu tabla:
                 // Nivel 1: 14%, Nivel 2: 10%, Nivel 3: 18%, Nivel 4: 8%, Nivel 5: 6%, Nivel 6: 0.5%, Nivel 7: 0.5%
-                $percent = (float) ($residualConfig?->{'level' . $countLevel} ?? 0);
-                $point = $points * $percent / 100;
                 $beneficiaryCode = $_paymentOrderPoint->sponsor_code;
                 $beneficiary = User::where('uuid', $beneficiaryCode)->first();
-                $exists = PaymentOrderPoint::where('payment_order_id', $paymentLog->payment_order_id)
+                $beneficiaryRangeOrder = (int) ($beneficiary?->range?->range?->order ?? 0);
+                $rule = CommissionRule::with('minimumRange')->where('bonus_type', CommissionRule::RESIDUAL)
+                    ->where('level', $countLevel)->where('state', true)->first();
+                $requiredRangeOrder = (int) ($rule?->minimumRange?->order ?? 0);
+                $isActive = $beneficiary?->active ?? false;
+                $percent = ($rule && $beneficiary && $isActive && $beneficiaryRangeOrder >= $requiredRangeOrder)
+                    ? (float) $rule->percentage : 0;
+                $point = $points * $percent / 100;
+                $exists = PaymentOrderPoint::where('payment_order_id', $paymentOrderId)
                     ->where('user_code', $beneficiaryCode)
                     ->where('type', PaymentOrderPoint::RESIDUAL)
                     ->where('level', $countLevel)
@@ -230,7 +239,8 @@ class CommissionService
                 // 🔥 Si el punto es mayor a 0, se crea el registro
                 if ($point > 0 && $beneficiary && !$exists) {
                     PaymentOrderPoint::create([
-                        'payment_order_id' => $paymentLog->payment_order_id,
+                        'payment_order_id' => $paymentOrderId,
+                        'manual_reactivation_id' => $manualReactivationId,
                         'user_code'        => $beneficiaryCode,
                         'sponsor_code'     => $this->networkTreeService->sponsorCode($beneficiaryCode) ?? '',
                         'source_user_code' => $userCurrent->uuid,
@@ -241,9 +251,19 @@ class CommissionService
                         'user_id'          => $beneficiary->id,
                         'state'            => 1 // Activo
                     ]);
+                    $summary['generated_count']++;
+                    $summary['generated_amount'] += $point;
+                } elseif ($beneficiary && !$exists) {
+                    $summary['blocked'][] = [
+                        'level' => $countLevel,
+                        'user_code' => $beneficiaryCode,
+                        'reason' => !$rule ? 'rule_not_configured'
+                            : (!$isActive ? 'beneficiary_inactive'
+                            : ($beneficiaryRangeOrder < $requiredRangeOrder ? 'minimum_range_not_met' : 'zero_percentage')),
+                    ];
                 }
             }
-        }
-    }
+    $summary['generated_amount'] = round($summary['generated_amount'], 2);
+    return $summary;
 }
 }

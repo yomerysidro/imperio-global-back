@@ -75,7 +75,15 @@ class Calculator
             if (!$isLegacy) {
                 $fecha = Carbon::parse($orderPoint->created_at);
                 $esMesActual = ($fecha->month == $targetMonth && $fecha->year == $targetYear);
-                if (!$esMesActual) continue;
+                $isEarning = in_array($orderPoint->type ?? '', [
+                    PaymentOrderPoint::PATROCINIO,
+                    PaymentOrderPoint::PATROCINIO_SERVICIO,
+                    PaymentOrderPoint::RESIDUAL,
+                    PaymentOrderPoint::RESIDUAL_SERVICIO,
+                    PaymentOrderPoint::INFINITO,
+                    'S',
+                ], true);
+                if (!$esMesActual && !$isEarning) continue;
             }
 
             // Obtener valores
@@ -113,7 +121,9 @@ class Calculator
             // B. BONOS DE PATROCINIO
             // =========================================================
             if ($userCodeUpper === $userCodeOrden && in_array($tipoFila, self::TIPOS_PATROCINIO)) {
-                $key = "ganancia_{$orderId}_{$tipoFila}";
+                // PS es el tipo vigente y S es su alias historico: nunca se pagan dos veces.
+                $canonicalType = in_array($tipoFila, ['PS', 'S'], true) ? 'PS' : $tipoFila;
+                $key = "ganancia_{$orderId}_{$canonicalType}";
                 if (!isset($processedGanancia[$key])) {
                     $categoria = $this->resolvePackCategory($packId, $orderId);
                     if ($tipoFila === 'P') {
@@ -202,6 +212,8 @@ class Calculator
             'puntosPersonalesProducto' => round($puntosProducto, 2),
             'puntosPersonalesServicio' => round($puntosServicio, 2),
             'infinito' => round($infinito, 2),
+            'bono' => round($patrocinioTotal, 2),
+            'bono_total' => round($patrocinioTotal + $residualTotal + $infinito, 2),
             'pointAfiliado' => 0.0,
             'personalGlobal' => 0.0,
             'patrocinioRequest' => 0.0,
@@ -271,6 +283,8 @@ class Calculator
             'puntosPersonalesProducto' => 0.0,
             'puntosPersonalesServicio' => 0.0,
             'infinito' => 0.0,
+            'bono' => 0.0,
+            'bono_total' => 0.0,
             'pointAfiliado' => 0.0,
             'personalGlobal' => 0.0,
             'patrocinioRequest' => 0.0,

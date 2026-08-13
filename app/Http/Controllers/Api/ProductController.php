@@ -147,7 +147,13 @@ class ProductController extends BaseController
     public function search()
     {
         try {
-            $productList = Product::with(['file_image'])->orderBy('created_at', 'desc')->get();
+            $productList = Product::with(['file_image'])->orderBy('created_at', 'desc')->get()
+                ->map(function (Product $product) {
+                    $product->base_points = (float) $product->points;
+                    $configuredPoints = ProductPointPack::where('product_id', $product->id)->max('point');
+                    $product->points = (float) ($configuredPoints ?? $product->points ?? 0);
+                    return $product;
+                });
 
             return $this->sendResponse( $productList , 'Lista');
         } catch (Exception $e) {

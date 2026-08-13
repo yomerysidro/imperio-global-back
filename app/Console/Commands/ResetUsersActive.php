@@ -139,7 +139,7 @@ class ResetUsersActive extends Command
                                 ( ($json->points?->pointAfiliado ?? 0) 
                                     + ($json->points?->patrocinio ?? 0) 
                                     + ($json->points?->residual ?? 0) 
-                                    + ( ($json->points?->personal ?? 0) * 0.02 ) 
+                                    + ($json->points?->infinito ?? 0)
                                 ),
                                 $json->points?->compra ?? 0,
                                 $json->points->personal ?? 0,
@@ -224,6 +224,7 @@ class ResetUsersActive extends Command
                 ->update(array( "state" => PaymentLog::TERMINADO ));
 
             PaymentOrderPoint::where('state', true)
+                ->whereIn('type', [PaymentOrderPoint::COMPRA, PaymentOrderPoint::GRUPAL])
                 ->whereMonth('created_at', now()->month)
                 ->whereYear('created_at', now()->year)
                 ->update(["state" => false]);

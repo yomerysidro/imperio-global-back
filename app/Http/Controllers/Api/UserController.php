@@ -36,6 +36,7 @@ use App\Mail\InivitedSponsorUser;
 use App\Services\Core\CodeGenerator;
 use App\Models\VerificationCodeUser;
 use App\Models\SponsorRelation;
+use App\Services\Core\RangeQualificationService;
 
 class UserController extends BaseController
 {
@@ -99,11 +100,14 @@ class UserController extends BaseController
             // =========================================================
             // 🔥 CÁLCULO DE PUNTOS (EXACTO AL DE auth())
             // =========================================================
-            $paymentOrderPoints = PaymentOrderPoint::where('state', 1)
+            $monthlyVolume = PaymentOrderPoint::where('state', 1)
                 ->whereMonth('created_at', $mesFiltro)
                 ->whereYear('created_at', $anioFiltro)
-                ->whereIn('type', ['B', 'G', 'R', 'RS', 'P', 'PS', 'S', 'I'])
+                ->whereIn('type', ['B', 'G'])
                 ->get();
+            $historicalEarnings = PaymentOrderPoint::where('state', 1)
+                ->whereIn('type', ['R', 'RS', 'P', 'PS', 'S', 'I'])->get();
+            $paymentOrderPoints = $monthlyVolume->merge($historicalEarnings)->unique('id')->values();
 
             $paymentProductOrderPoints = PaymentProductOrderPoint::where("user_id", $user->id)
                 ->where("state", true)
@@ -117,8 +121,8 @@ class UserController extends BaseController
 
             $puntosPersonales = $paymentOrderPointsUser->where('type', 'B')->sum('point');
             $puntosRed        = $paymentOrderPointsUser->where('type', 'G')->sum('point');
-            $puntosResiduales = $paymentOrderPointsUser->whereIn('type', ['R', 'RS'])->sum('point');
-            $gananciaPatrocinio = $paymentOrderPointsUser->whereIn('type', ['P', 'PS', 'S'])->sum('point');
+            $puntosResiduales = $this->commissionTotal($paymentOrderPointsUser, ['R', 'RS']);
+            $gananciaPatrocinio = $this->sponsorshipTotal($paymentOrderPointsUser);
             $puntosInfinito   = $paymentOrderPointsUser->where('type', 'I')->sum('point');
 
             $totalPoints = $puntosPersonales + $puntosRed;
@@ -131,6 +135,9 @@ class UserController extends BaseController
                 'pointGroup'          => $puntosRed,
                 'personal'            => $puntosPersonales,
                 'infinito'            => $puntosInfinito,
+                'bono'                => $gananciaPatrocinio,
+                'bono_total'          => $gananciaPatrocinio + $puntosResiduales + $puntosInfinito,
+                'total_comisiones'    => $gananciaPatrocinio + $puntosResiduales + $puntosInfinito,
                 'pointAfiliado'       => 0,
                 'personalGlobal'      => 0,
                 'patrocinioRequest'   => 0,
@@ -206,12 +213,12 @@ class UserController extends BaseController
             }
         }
 
-        if ($userModel->is_admin) {
+        if ($userModel->is_admin || strcasecmp((string) $userModel->uuid, 'DOSB') === 0) {
             $isActive = true;
             if ($servicePayment) {
                 $servicePayment->state = PaymentLog::PAGADO;
             }
-            if (!$ultimoPago) {
+            if ($userModel->is_admin && !$ultimoPago) {
                 $defaultPack = Pack::where('title', 'Pack Empresario')->first();
                 if ($defaultPack) {
                     $paymentOrder = PaymentOrder::create([
@@ -249,6 +256,10 @@ class UserController extends BaseController
             ->whereYear('created_at', $anioFiltro)
             ->whereIn('type', ['B', 'G', 'R', 'RS', 'P', 'PS', 'S', 'I']) // TODOS LOS TIPOS
             ->get();
+        // Las ganancias no vencen: se acumulan historicamente sin techo.
+        $historicalEarnings = PaymentOrderPoint::where('state', 1)
+            ->whereIn('type', ['R', 'RS', 'P', 'PS', 'S', 'I'])->get();
+        $paymentOrderPoints = $paymentOrderPoints->merge($historicalEarnings)->unique('id')->values();
 
         // 🔥 CORRECCIÓN 2: FILTRAR SOLO LOS PUNTOS DEL USUARIO ACTUAL
         $paymentOrderPointsUser = $paymentOrderPoints->filter(function ($point) use ($userModel) {
@@ -258,8 +269,8 @@ class UserController extends BaseController
         // 🔥 CORRECCIÓN 3: CALCULAR PUNTOS POR TIPO (Todos los tipos)
         $puntosPersonales = $paymentOrderPointsUser->where('type', 'B')->sum('point'); // COMPRA
         $puntosRed        = $paymentOrderPointsUser->where('type', 'G')->sum('point'); // GRUPAL
-        $puntosResiduales = $paymentOrderPointsUser->whereIn('type', ['R', 'RS'])->sum('point');
-        $gananciaPatrocinio = $paymentOrderPointsUser->whereIn('type', ['P', 'PS', 'S'])->sum('point');
+        $puntosResiduales = $this->commissionTotal($paymentOrderPointsUser, ['R', 'RS']);
+        $gananciaPatrocinio = $this->sponsorshipTotal($paymentOrderPointsUser);
         $puntosInfinito   = $paymentOrderPointsUser->where('type', 'I')->sum('point'); // INFINITO
 
         // 🔥 CORRECCIÓN 4: TOTAL DE PUNTOS PARA RANGO = COMPRA + GRUPAL + RESIDUAL
@@ -331,6 +342,8 @@ class UserController extends BaseController
                 'pointGroupMonthly'  => (float) $monthlyGroupVolume,
                 'personal'           => 0,
                 'infinito'           => (float) $puntosInfinito,
+                'bono'               => (float) $gananciaPatrocinio,
+                'bono_total'         => (float) $totalComisiones,
                 'pointAfiliado'      => 0,
                 'personalGlobal'     => 0,
                 'patrocinioRequest'  => 0,
@@ -376,6 +389,8 @@ class UserController extends BaseController
                 'pointGroup'          => $puntosRed,          // Puntos grupales (G)
                 'personal'            => $puntosPersonales,   // Puntos personales (B)
                 'infinito'            => $puntosInfinito,     // Bono infinito (I)
+                'bono'                => $gananciaPatrocinio,
+                'bono_total'          => $totalComisiones,
                 'pointAfiliado'       => 0,
                 'personalGlobal'      => 0,
                 'patrocinioRequest'   => 0,
@@ -391,43 +406,17 @@ class UserController extends BaseController
 
         $userModel->totalPoints = $totalPoints;
 
-        // RANGOS
-        $ranges = Range::where("state", true)->orderBy('points', 'asc')->get();
-        $rangeCurrent = null;
-        foreach ($ranges as $range) {
-            if ($range->points <= $totalPoints && $range->childs <= (int) $userModel->directos) {
-                $rangeCurrent = $range;
-            }
-        }
-
-        if (!$rangeCurrent) {
-            $bronce = Range::where('points', 1000)->where('childs', 1)->where('state', true)->first();
-            if ($bronce && $totalPoints >= 1000 && $userModel->directos >= 1) {
-                $rangeCurrent = $bronce;
-            }
-        }
-
-        if ($rangeCurrent) {
-            $existingRange = RangeUser::where('user_id', $userModel->id)->where('status', true)->first();
-            if ($existingRange) {
-                if ($existingRange->range_id != $rangeCurrent->id) {
-                    $existingRange->update(['range_id' => $rangeCurrent->id, 'updated_at' => now()]);
-                }
-                $userModel->range = (object) ['range' => $rangeCurrent];
-            } else {
-                RangeUser::create([
-                    'user_id'    => $userModel->id,
-                    'range_id'   => $rangeCurrent->id,
-                    'status'     => true,
-                    'created_at' => now(),
-                    'updated_at' => now()
-                ]);
-                $userModel->range = (object) ['range' => $rangeCurrent];
-            }
-        } else {
-            RangeUser::where('user_id', $userModel->id)->where('status', true)->update(['status' => false]);
-            $userModel->range = null;
-        }
+        // Sincronizar el rango con el mismo volumen B + G que muestra el perfil.
+        app(RangeQualificationService::class)->recalculateUser($userModel);
+        $userModel->load('range.range.rule');
+        $rangeCurrent = $userModel->range?->range;
+        $nextRange = Range::where('state', true)
+            ->when($rangeCurrent, fn ($query) => $query->where('order', '>', $rangeCurrent->order))
+            ->orderBy('order')->first();
+        $progressTarget = $nextRange ?: $rangeCurrent;
+        $rangeProgress = $progressTarget && (float) $progressTarget->points > 0
+            ? min(100, round(((float) $totalPoints / (float) $progressTarget->points) * 100, 2))
+            : 0;
 
         $responsePayload                    = $userModel->toArray();
         // `points` conserva el resumen tipado que consume el home. Exponer los
@@ -450,10 +439,20 @@ class UserController extends BaseController
             'puntos_red'          => $puntosRed,
             'ganancia_patrocinio' => $gananciaPatrocinio,
             'puntos_residuales'   => $puntosResiduales,
+            'bono'                => $gananciaPatrocinio,
+            'residual'            => $puntosResiduales,
+            'infinito'            => $puntosInfinito,
+            'bono_total'          => $gananciaPatrocinio + $puntosResiduales + $puntosInfinito,
             'total_puntos'        => $totalPoints,
             'paquete_actual'      => $userModel->package_name ?? 'Sin paquete',
             'rango_actual'        => $rangeCurrent ? $rangeCurrent->title : 'Sin rango'
         ];
+        $responsePayload['current_range'] = $rangeCurrent;
+        $responsePayload['next_range'] = $nextRange;
+        $responsePayload['range_progress'] = $rangeProgress;
+        $responsePayload['points_to_next_range'] = $nextRange
+            ? max(0, (float) $nextRange->points - (float) $totalPoints)
+            : 0;
 
         return $this->sendResponse((object)$responsePayload, 'Perfil sincronizado');
     } catch (Exception $e) {
@@ -618,6 +617,10 @@ class UserController extends BaseController
                 }
             }
 
+            if ($user->is_admin || strcasecmp((string) $user->uuid, 'DOSB') === 0) {
+                $isActive = true;
+            }
+
             if (!$isActive && $ultimoPago) $ultimoPago->state = 6;
             $userList[$key]->payment = $ultimoPago;
             $userList[$key]->package_name = $user->package_name;
@@ -644,16 +647,11 @@ class UserController extends BaseController
             // 🔥 ASIGNAR EL OBJETO COMPLETO AL USUARIO
             $userList[$key]->points = $userPoints;
 
-            // El rango mostrado debe derivarse del volumen vigente, no depender
-            // exclusivamente de un RangeUser creado previamente por un proceso batch.
-            $directCount = count($this->networkTreeService->directUserCodes($user->uuid));
-            $currentRange = null;
-            foreach ($activeRanges as $candidate) {
-                if ((float) $candidate->points <= (float) $userPoints->total_general
-                    && (int) $candidate->childs <= $directCount) {
-                    $currentRange = $candidate;
-                }
-            }
+            // Usar el mismo motor de calificacion que el perfil y el CRON.
+            app(RangeQualificationService::class)->recalculateUser($user);
+            $user->unsetRelation('range');
+            $user->load('range.range.file');
+            $currentRange = $user->range?->range;
 
             $nextRange = $activeRanges->first(function ($candidate) use ($currentRange) {
                 return !$currentRange || (int) $candidate->order > (int) $currentRange->order;
@@ -663,13 +661,7 @@ class UserController extends BaseController
                 ? min(100, round(((float) $userPoints->total_general / (float) $progressTarget->points) * 100, 2))
                 : 0;
 
-            if ($currentRange) {
-                $rangeView = new RangeUser();
-                $rangeView->setRelation('range', $currentRange);
-                $userList[$key]->setRelation('range', $rangeView);
-            } else {
-                $userList[$key]->setRelation('range', null);
-            }
+            $userList[$key]->setRelation('range', $user->range);
             $userList[$key]->next_range = $nextRange;
             $userList[$key]->range_progress = $progress;
             $userList[$key]->points_to_next_range = $nextRange
@@ -854,7 +846,7 @@ class UserController extends BaseController
                     "bono_personal"     => $calculatorPoint->personal,
                     "bono_pratocinio"   => $calculatorPoint->patrocinio,
                     "bono_residual"     => $calculatorPoint->residual,
-                    "bono_totales"      => $calculatorPoint->patrocinio + $calculatorPoint->residual,
+                    "bono_totales"      => $calculatorPoint->patrocinio + $calculatorPoint->residual + $calculatorPoint->infinito,
                     "punto_grupales"    => $calculatorPoint->pointGroup,
                     "punto_plan_actual" => $calculatorPoint->compra->total_puntos,
                     "gran_total"        => $totalPoints,
@@ -956,7 +948,9 @@ class UserController extends BaseController
             $userCurrent = User::where("uuid", $dataBody->userCode)->first();
 
             PaymentLog::where("user_id", $userCurrent->id)->update(["state"               => PaymentLog::RESET]);
-            PaymentOrderPoint::where("user_id", $userCurrent->id)->update(["state"        => false, "type" => PaymentOrderPoint::RESET]);
+            PaymentOrderPoint::where("user_id", $userCurrent->id)
+                ->whereIn('type', [PaymentOrderPoint::COMPRA, PaymentOrderPoint::GRUPAL])
+                ->update(["state" => false]);
             PaymentProductOrder::where("user_id", $userCurrent->id)->update(["state"      => PaymentProductOrder::TERMINADO]);
             PaymentProductOrderPoint::where("user_id", $userCurrent->id)->update(["state" => false]);
             RangeUser::where("user_id", $userCurrent->id)->update(["status"               => false]);
@@ -1265,5 +1259,19 @@ class UserController extends BaseController
             DB::rollBack();
             return $this->sendError($e->getMessage(), [], 402);
         }
+    }
+
+    private function sponsorshipTotal($points): float
+    {
+        return $this->commissionTotal($points, ['P', 'PS', 'S']);
+    }
+
+    private function commissionTotal($points, array $types): float
+    {
+        return (float) $points->whereIn('type', $types)->groupBy(function ($point) {
+            $type = $point->type === 'S' ? 'PS' : $point->type;
+            return implode('|', [$point->payment_order_id ?: 'ROW-'.$point->id,
+                strtoupper((string) $point->user_code), (int) ($point->level ?? 0), $type]);
+        })->sum(fn ($rows) => (float) $rows->max('point'));
     }
 }

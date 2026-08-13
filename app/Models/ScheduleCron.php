@@ -13,5 +13,6 @@ class ScheduleCron extends Model
         'id',
         'signature',
         'response',
+        'status',
     ];
 }
