@@ -190,11 +190,11 @@ class FinanceController extends BaseController
                 ?? 0);
             $personalPurchasePoints = (float) $paymentProductOrderPoints
                 ->where('user_id', $user->id)->sum('points');
+            $isCurrentPeriod = $from->format('Y-m') === now()->format('Y-m');
+            $isActiveInPeriod = app(ActivationService::class)
+                ->isActiveForPeriod($user, $from, $to, !$isCurrentPeriod);
             $status = !$latestPackagePayment ? 'Sin plan'
-                : (in_array((int) $latestPackagePayment->state, [
-                    PaymentLog::PAGADO,
-                    PaymentProductOrder::ENVIADO,
-                ], true) ? 'Activo' : 'Inactivo');
+                : ($isActiveInPeriod ? 'Activo' : 'Inactivo');
 
             $global['personal'] += $personalBonus;
             $global['patrocinio'] += $sponsorship;
