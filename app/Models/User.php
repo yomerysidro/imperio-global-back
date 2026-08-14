@@ -108,7 +108,7 @@ class User extends Authenticatable
         // 1. Membresía de Servicios Digitales (Estado 2 o 6)
         $services = PaymentLog::with('paymentOrder.pack')
             ->where('user_id', $this->id)
-            ->where('state', PaymentLog::PAGADO)
+            ->whereIn('state', [PaymentLog::PAGADO, PaymentLog::TERMINADO])
             ->orderBy('created_at')
             ->get();
         foreach ($services as $log) {
@@ -121,7 +121,11 @@ class User extends Authenticatable
         // 2. Packs de Productos (Estado 2, 3 o 6)
         $products = PaymentProductOrder::with('pack')
             ->where('user_id', $this->id)
-            ->whereIn('state', [PaymentProductOrder::PAGADO, PaymentProductOrder::ENVIADO])
+            ->whereIn('state', [
+                PaymentProductOrder::PAGADO,
+                PaymentProductOrder::ENVIADO,
+                PaymentProductOrder::TERMINADO,
+            ])
             ->orderBy('created_at')
             ->get();
         foreach ($products as $order) {
