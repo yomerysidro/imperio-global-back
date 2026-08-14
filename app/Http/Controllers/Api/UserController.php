@@ -77,6 +77,7 @@ class UserController extends BaseController
                 ->where("user_id", $user->id)->whereIn('state', [PaymentProductOrder::PAGADO, PaymentProductOrder::ENVIADO])->orderBy('created_at', 'desc')->first();
 
             $ultimoPago = collect([$servicePayment, $productPayment])->filter()->sortByDesc('created_at')->first();
+            $displayPayment = $ultimoPago ?? $this->latestTerminatedPackagePayment($user->id);
 
             $isActive   = false;
             $mesFiltro  = $currentMonth;
@@ -96,7 +97,7 @@ class UserController extends BaseController
             }
 
             if (!$isActive && $ultimoPago) $ultimoPago->state = 6;
-            $user->payment = $ultimoPago;
+            $user->payment = $displayPayment;
 
             // =========================================================
             // 🔥 CÁLCULO DE PUNTOS (EXACTO AL DE auth())
@@ -195,6 +196,7 @@ class UserController extends BaseController
             ->where("user_id", $user_id)->whereIn('state', [PaymentProductOrder::PAGADO, PaymentProductOrder::ENVIADO])->orderBy('created_at', 'desc')->first();
 
         $ultimoPago = collect([$servicePayment, $productPayment])->filter()->sortByDesc('created_at')->first();
+        $displayPayment = $ultimoPago ?? $this->latestTerminatedPackagePayment($user_id);
 
         $isActive   = false;
         $mesFiltro  = $currentMonth;
@@ -245,7 +247,7 @@ class UserController extends BaseController
             PaymentLog::where('id', $ultimoPago->id)->update(['state' => 6]);
         }
 
-        $userModel->payment      = $ultimoPago;
+        $userModel->payment      = $displayPayment;
         $userModel->package_name = $userModel->package_name;
         $userModel->active       = $isActive;
 
@@ -608,6 +610,7 @@ class UserController extends BaseController
                 ->where("user_id", $user->id)->whereIn('state', [PaymentProductOrder::PAGADO, PaymentProductOrder::ENVIADO])->orderBy('created_at', 'desc')->first();
 
             $ultimoPago = collect([$servicePayment, $productPayment])->filter()->sortByDesc('created_at')->first();
+            $displayPayment = $ultimoPago ?? $this->latestTerminatedPackagePayment($user->id);
 
             $isActive = false;
             $mesFiltro = $currentMonth;
@@ -631,7 +634,7 @@ class UserController extends BaseController
             }
 
             if (!$isActive && $ultimoPago) $ultimoPago->state = 6;
-            $userList[$key]->payment = $ultimoPago;
+            $userList[$key]->payment = $displayPayment;
             $userList[$key]->package_name = $user->package_name;
             // Esta marca solo corresponde a reactivaciones mensuales registradas.
             // Una compra normal de paquete o productos no habilita la desactivación.
@@ -1275,6 +1278,25 @@ class UserController extends BaseController
             DB::rollBack();
             return $this->sendError($e->getMessage(), [], 402);
         }
+    }
+
+    private function latestTerminatedPackagePayment(int $userId)
+    {
+        $service = PaymentLog::with('paymentOrder.pack')
+            ->where('user_id', $userId)
+            ->where('state', PaymentLog::TERMINADO)
+            ->latest('created_at')
+            ->first();
+        $product = PaymentProductOrder::with('pack')
+            ->where('user_id', $userId)
+            ->where('state', PaymentProductOrder::TERMINADO)
+            ->latest('created_at')
+            ->first();
+
+        return collect([$service, $product])
+            ->filter()
+            ->sortByDesc('created_at')
+            ->first();
     }
 
     private function sponsorshipTotal($points): float
