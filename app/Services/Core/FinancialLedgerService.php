@@ -3,6 +3,7 @@
 namespace App\Services\Core;
 
 use App\Models\PaymentOrderPoint;
+use App\Models\User;
 use Carbon\CarbonInterface;
 use Illuminate\Support\Collection;
 
@@ -17,12 +18,28 @@ class FinancialLedgerService
         if ($from && $to) $query->whereBetween('created_at', [$from, $to]);
         if ($userCode) $query->whereRaw('UPPER(user_code) = ?', [strtoupper($userCode)]);
 
-        return $query->orderBy('id')->get()
+        $movements = $query->orderBy('id')->get()
             ->groupBy(fn (PaymentOrderPoint $row) => $this->logicalCommissionKey($row))
             // Si un proceso reintenta exactamente la misma comision, el
             // primer asiento es el original. Nunca elegir por mayor importe.
             ->map(fn (Collection $duplicates) => $duplicates->first())
             ->values();
+
+        if (!$from || !$to || $movements->isEmpty()) return $movements;
+
+        $users = User::whereIn('uuid', $movements->pluck('user_code')->filter()->unique())
+            ->get()->keyBy(fn (User $user) => strtoupper((string) $user->uuid));
+        $activation = app(ActivationService::class);
+        $isCurrentPeriod = $from->format('Y-m') === now()->format('Y-m');
+
+        // Una comision registrada solo es dinero pagable si su beneficiario
+        // estuvo activo en el periodo. El paquete historico no habilita cobro.
+        return $movements->filter(function (PaymentOrderPoint $movement) use (
+            $users, $activation, $from, $to, $isCurrentPeriod
+        ) {
+            $user = $users->get(strtoupper((string) $movement->user_code));
+            return $user && $activation->isActiveForPeriod($user, $from, $to, !$isCurrentPeriod);
+        })->values();
     }
 
     public function logicalCommissionKey(PaymentOrderPoint $row): string

@@ -147,7 +147,8 @@ class CommissionService
                 ]);
             }
 
-            if ($debeGenerarBono && $sponsorPack) {
+            if ($debeGenerarBono && $sponsorPack
+                && app(ActivationService::class)->isActive($sponsorUser)) {
                 // El porcentaje corresponde al paquete que originó la afiliación,
                 // no al paquete personal del beneficiario.
                 $sponsorshipConfig = CommissionRule::where('bonus_type', CommissionRule::SPONSORSHIP)
