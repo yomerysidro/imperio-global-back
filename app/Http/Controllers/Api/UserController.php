@@ -36,6 +36,7 @@ use App\Mail\InivitedSponsorUser;
 use App\Services\Core\CodeGenerator;
 use App\Models\VerificationCodeUser;
 use App\Models\SponsorRelation;
+use App\Models\ManualReactivation;
 use App\Services\Core\RangeQualificationService;
 
 class UserController extends BaseController
@@ -71,9 +72,9 @@ class UserController extends BaseController
             $isGracePeriod = $now->day <= 2;
 
             $servicePayment = PaymentLog::with(['paymentOrder.pack'])
-                ->where("user_id", $user->id)->whereIn('state', [2, 6])->orderBy('created_at', 'desc')->first();
+                ->where("user_id", $user->id)->whereIn('state', [PaymentLog::PAGADO])->orderBy('created_at', 'desc')->first();
             $productPayment = PaymentProductOrder::with(['pack'])
-                ->where("user_id", $user->id)->whereIn('state', [2, 3, 6])->orderBy('created_at', 'desc')->first();
+                ->where("user_id", $user->id)->whereIn('state', [PaymentProductOrder::PAGADO, PaymentProductOrder::ENVIADO])->orderBy('created_at', 'desc')->first();
 
             $ultimoPago = collect([$servicePayment, $productPayment])->filter()->sortByDesc('created_at')->first();
 
@@ -100,14 +101,11 @@ class UserController extends BaseController
             // =========================================================
             // 🔥 CÁLCULO DE PUNTOS (EXACTO AL DE auth())
             // =========================================================
-            $monthlyVolume = PaymentOrderPoint::where('state', 1)
+            $paymentOrderPoints = PaymentOrderPoint::where('state', 1)
                 ->whereMonth('created_at', $mesFiltro)
                 ->whereYear('created_at', $anioFiltro)
-                ->whereIn('type', ['B', 'G'])
+                ->whereIn('type', ['B', 'G', 'R', 'RS', 'P', 'PS', 'S', 'I'])
                 ->get();
-            $historicalEarnings = PaymentOrderPoint::where('state', 1)
-                ->whereIn('type', ['R', 'RS', 'P', 'PS', 'S', 'I'])->get();
-            $paymentOrderPoints = $monthlyVolume->merge($historicalEarnings)->unique('id')->values();
 
             $paymentProductOrderPoints = PaymentProductOrderPoint::where("user_id", $user->id)
                 ->where("state", true)
@@ -190,9 +188,9 @@ class UserController extends BaseController
         $isGracePeriod = $now->day <= 2;
 
         $servicePayment = PaymentLog::with(['paymentOrder.pack'])
-            ->where("user_id", $user_id)->whereIn('state', [2, 6])->orderBy('created_at', 'desc')->first();
+            ->where("user_id", $user_id)->whereIn('state', [PaymentLog::PAGADO])->orderBy('created_at', 'desc')->first();
         $productPayment = PaymentProductOrder::with(['pack', 'details.product'])
-            ->where("user_id", $user_id)->whereIn('state', [2, 3, 6])->orderBy('created_at', 'desc')->first();
+            ->where("user_id", $user_id)->whereIn('state', [PaymentProductOrder::PAGADO, PaymentProductOrder::ENVIADO])->orderBy('created_at', 'desc')->first();
 
         $ultimoPago = collect([$servicePayment, $productPayment])->filter()->sortByDesc('created_at')->first();
 
@@ -256,10 +254,8 @@ class UserController extends BaseController
             ->whereYear('created_at', $anioFiltro)
             ->whereIn('type', ['B', 'G', 'R', 'RS', 'P', 'PS', 'S', 'I']) // TODOS LOS TIPOS
             ->get();
-        // Las ganancias no vencen: se acumulan historicamente sin techo.
-        $historicalEarnings = PaymentOrderPoint::where('state', 1)
-            ->whereIn('type', ['R', 'RS', 'P', 'PS', 'S', 'I'])->get();
-        $paymentOrderPoints = $paymentOrderPoints->merge($historicalEarnings)->unique('id')->values();
+        // El Home muestra solo las ganancias del periodo seleccionado.
+        // El historial permanece disponible en los reportes financieros.
 
         // 🔥 CORRECCIÓN 2: FILTRAR SOLO LOS PUNTOS DEL USUARIO ACTUAL
         $paymentOrderPointsUser = $paymentOrderPoints->filter(function ($point) use ($userModel) {
@@ -279,7 +275,9 @@ class UserController extends BaseController
         $totalPoints = $puntosPersonales + $puntosRed;
         $totalComisiones = $gananciaPatrocinio + $puntosResiduales + $puntosInfinito;
 
-        $legacyTokens = GuestsTokenUser::where('state', true)->get();
+        // Las invitaciones antiguas no representan socios activos ni deben
+        // alimentar los indicadores actuales del Home.
+        $legacyTokens = collect();
 
         // 🔥 CORRECCIÓN 5: LÓGICA PARA DOSB (CORPORATIVO)
         if (strtoupper($userModel->uuid) == 'DOSB') {
@@ -291,12 +289,12 @@ class UserController extends BaseController
                 $user = User::where('uuid', $guestCode)->first();
                 if ($user) {
                     $hasPayment = PaymentLog::where('user_id', $user->id)
-                        ->whereIn('state', [2, 6])
+                        ->whereIn('state', [PaymentLog::PAGADO])
                         ->whereMonth('created_at', $now->month)
                         ->whereYear('created_at', $now->year)
                         ->exists();
                     $hasProduct = PaymentProductOrder::where('user_id', $user->id)
-                        ->whereIn('state', [PaymentProductOrder::PAGADO, PaymentProductOrder::ENVIADO, PaymentProductOrder::TERMINADO])
+                        ->whereIn('state', [PaymentProductOrder::PAGADO, PaymentProductOrder::ENVIADO])
                         ->whereMonth('created_at', $now->month)
                         ->whereYear('created_at', $now->year)
                         ->exists();
@@ -309,17 +307,10 @@ class UserController extends BaseController
                 fn ($code) => strcasecmp($code, 'DOSB') !== 0
             ));
 
-            $historicalGroupVolume = DB::query()->fromSub(
-                PaymentOrderPoint::select('payment_order_id', DB::raw('MAX(point) as point'))
-                    ->whereIn('user_code', $descendantCodes)
-                    ->where('type', PaymentOrderPoint::COMPRA)
-                    ->groupBy('payment_order_id'),
-                'network_purchases'
-            )->sum('point');
-
             $monthlyGroupVolume = DB::query()->fromSub(
                 PaymentOrderPoint::select('payment_order_id', DB::raw('MAX(point) as point'))
                     ->whereIn('user_code', $descendantCodes)
+                    ->where('state', true)
                     ->where('type', PaymentOrderPoint::COMPRA)
                     ->whereMonth('created_at', $mesFiltro)
                     ->whereYear('created_at', $anioFiltro)
@@ -330,7 +321,9 @@ class UserController extends BaseController
             $userModel->activos = $activos;
             $userModel->red_total = count($descendantCodes);
             $userModel->personas_red = count($descendantCodes);
-            $userModel->volumen_grupal_historico = (float) $historicalGroupVolume;
+            // Se conserva la clave por compatibilidad con el frontend, pero
+            // nunca se mezcla el acumulado historico con el periodo actual.
+            $userModel->volumen_grupal_historico = (float) $monthlyGroupVolume;
             $userModel->volumen_grupal_mensual = (float) $monthlyGroupVolume;
             $totalPoints = (float) $monthlyGroupVolume;
 
@@ -363,12 +356,12 @@ class UserController extends BaseController
                 $user = User::where('uuid', $directCode)->first();
                 if ($user) {
                     $hasActivePayment = PaymentLog::where('user_id', $user->id)
-                        ->whereIn('state', [2, 6])
+                        ->whereIn('state', [PaymentLog::PAGADO])
                         ->whereMonth('created_at', $mesFiltro)
                         ->whereYear('created_at', $anioFiltro)
                         ->exists();
                     $hasActiveProduct = PaymentProductOrder::where('user_id', $user->id)
-                        ->whereIn('state', [2, 3, 6])
+                        ->whereIn('state', [PaymentProductOrder::PAGADO, PaymentProductOrder::ENVIADO])
                         ->whereMonth('created_at', $mesFiltro)
                         ->whereYear('created_at', $anioFiltro)
                         ->exists();
@@ -544,10 +537,10 @@ class UserController extends BaseController
         if ($request->has('plan') && !empty($request->query('plan'))) {
             $plan = $request->query('plan');
             if ($plan == -1) {
-                $user_payments = PaymentLog::whereIn('state', [2, 6])->pluck('user_id')->toArray();
+                $user_payments = PaymentLog::where('state', PaymentLog::PAGADO)->pluck('user_id')->toArray();
                 $userList = $userList->whereNotIn("id", $user_payments);
             } else {
-                $user_payments_pack = PaymentLog::whereIn('state', [2, 6])->whereHas("paymentOrder.pack", function ($q) use ($plan) {
+                $user_payments_pack = PaymentLog::where('state', PaymentLog::PAGADO)->whereHas("paymentOrder.pack", function ($q) use ($plan) {
                     $q->where('id', $plan);
                 })->pluck('user_id')->toArray();
                 $userList = $userList->whereIn("id", $user_payments_pack);
@@ -583,10 +576,18 @@ class UserController extends BaseController
             ->get();
 
         $userIds = collect($userList->items())->pluck('uuid')->toArray();
+        $paginatedUserIds = collect($userList->items())->pluck('id')->toArray();
+        $activeManualReactivationUserIds = ManualReactivation::whereIn('user_id', $paginatedUserIds)
+            ->where('state', ManualReactivation::ACTIVE)
+            ->pluck('user_id')
+            ->map(fn ($id) => (int) $id)
+            ->all();
 
         // 🔥 Sumar los bonos históricos (P, S, R, RS) - esto es para el frontend como dato adicional
         $historicalBonuses = PaymentOrderPoint::select('user_code', DB::raw('SUM(point) as total_bono'))
             ->whereIn('user_code', $userIds)->where('state', 1)
+            ->whereMonth('created_at', $currentMonth)
+            ->whereYear('created_at', $currentYear)
             ->whereIn('type', [PaymentOrderPoint::PATROCINIO, PaymentOrderPoint::PATROCINIO_SERVICIO, PaymentOrderPoint::RESIDUAL, PaymentOrderPoint::RESIDUAL_SERVICIO, PaymentOrderPoint::INFINITO])
             ->groupBy('user_code')->pluck('total_bono', 'user_code');
 
@@ -594,9 +595,9 @@ class UserController extends BaseController
 
         foreach ($userList as $key => $user) {
             $servicePayment = PaymentLog::with(['paymentOrder.pack', 'paymentOrder.sponsor.file'])
-                ->where("user_id", $user->id)->whereIn('state', [2, 6])->orderBy('created_at', 'desc')->first();
+                ->where("user_id", $user->id)->whereIn('state', [PaymentLog::PAGADO])->orderBy('created_at', 'desc')->first();
             $productPayment = PaymentProductOrder::with(['pack'])
-                ->where("user_id", $user->id)->whereIn('state', [2, 3, 6])->orderBy('created_at', 'desc')->first();
+                ->where("user_id", $user->id)->whereIn('state', [PaymentProductOrder::PAGADO, PaymentProductOrder::ENVIADO])->orderBy('created_at', 'desc')->first();
 
             $ultimoPago = collect([$servicePayment, $productPayment])->filter()->sortByDesc('created_at')->first();
 
@@ -624,6 +625,13 @@ class UserController extends BaseController
             if (!$isActive && $ultimoPago) $ultimoPago->state = 6;
             $userList[$key]->payment = $ultimoPago;
             $userList[$key]->package_name = $user->package_name;
+            // Esta marca solo corresponde a reactivaciones mensuales registradas.
+            // Una compra normal de paquete o productos no habilita la desactivación.
+            $userList[$key]->manual_reactivation_active = in_array(
+                (int) $user->id,
+                $activeManualReactivationUserIds,
+                true
+            );
 
             // 🔧 Seleccionar los puntos según el mes filtrado
             $puntosDisponibles = ($mesFiltro == $currentMonth) ? $allPaymentOrderPoints : $allPaymentOrderPointsLastMonth;
