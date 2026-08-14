@@ -241,7 +241,12 @@ class CommissionService
                     ->where('level', $countLevel)->where('state', true)->first();
                 $requiredRangeOrder = (int) ($rule?->minimumRange?->order ?? 0);
                 $isActive = $beneficiary?->active ?? false;
-                $percent = ($rule && $beneficiary && $isActive && $beneficiaryRangeOrder >= $requiredRangeOrder)
+                // Los tres primeros niveles no requieren rango. Esta regla vive
+                // tambien en codigo para que se aplique desde el despliegue,
+                // incluso antes de sincronizar la configuracion de la BD.
+                $meetsRangeRequirement = $countLevel <= 3
+                    || $beneficiaryRangeOrder >= $requiredRangeOrder;
+                $percent = ($rule && $beneficiary && $isActive && $meetsRangeRequirement)
                     ? (float) $rule->percentage : 0;
                 $point = $points * $percent / 100;
                 $exists = PaymentOrderPoint::where('payment_order_id', $paymentOrderId)
@@ -273,7 +278,7 @@ class CommissionService
                         'user_code' => $beneficiaryCode,
                         'reason' => !$rule ? 'rule_not_configured'
                             : (!$isActive ? 'beneficiary_inactive'
-                            : ($beneficiaryRangeOrder < $requiredRangeOrder ? 'minimum_range_not_met' : 'zero_percentage')),
+                            : (!$meetsRangeRequirement ? 'minimum_range_not_met' : 'zero_percentage')),
                     ];
                 }
             }
