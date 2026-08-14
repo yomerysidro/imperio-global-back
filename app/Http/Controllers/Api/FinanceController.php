@@ -610,16 +610,18 @@ class FinanceController extends BaseController
             }
 
             PaymentLog::with(['paymentOrder'])->where('state', PaymentLog::PAGADO)
+                ->whereBetween('created_at', [$from, $to])
                 ->update(["state" => PaymentLog::TERMINADO]);
 
             PaymentOrderPoint::where('state', true)
                 ->whereIn('type', [PaymentOrderPoint::COMPRA, PaymentOrderPoint::GRUPAL])
-                ->whereMonth('created_at', $fechaActual->month)
-                ->whereYear('created_at', $fechaActual->year)
+                ->whereBetween('created_at', [$from, $to])
                 ->update(["state" => false]);
+            PaymentProductOrder::whereIn('state', [PaymentProductOrder::PAGADO, PaymentProductOrder::ENVIADO])
+                ->whereBetween('created_at', [$from, $to])
+                ->update(["state" => PaymentProductOrder::TERMINADO]);
             PaymentProductOrderPoint::where("state", true)
-                ->whereMonth('created_at', $fechaActual->month)
-                ->whereYear('created_at', $fechaActual->year)
+                ->whereBetween('created_at', [$from, $to])
                 ->update(["state" => false]);
             RangeUser::where("status", true)->update(["status"              => false]);
 
