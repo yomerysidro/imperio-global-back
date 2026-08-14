@@ -100,41 +100,19 @@ class FinanceController extends BaseController
     public function exportExcelFinance(Request $request)
     {
         try {
-            $fechaActual = Carbon::now();
-            $oneMonthAgo = $fechaActual->copy()->subMonth();
-
-            $userAdmin = User::where("is_admin", true)->first();
-            if (!$userAdmin) {
-                return $this->sendError("No se encontró un usuario administrador", [], 404);
+            $reportDate = Carbon::now()->subMonth();
+            if ($request->filled('month') || $request->filled('year')) {
+                $reportMonth = (int) $request->input('month', $reportDate->month);
+                $reportYear = (int) $request->input('year', $reportDate->year);
+                if ($reportMonth < 1 || $reportMonth > 12 || $reportYear < 2000) {
+                    return $this->sendError('Periodo invalido.', [], 422);
+                }
+                $reportDate = Carbon::create($reportYear, $reportMonth, 1);
             }
 
-            $tempUser = UserEmailTemp::where("userId", $userAdmin->id)
-                ->where("month", $oneMonthAgo->format('m'))
-                ->where("year", $oneMonthAgo->format('Y'))
-                ->first();
-
-            if (!$tempUser) {
-                return $this->generateExcelReportRealTime($oneMonthAgo);
-            }
-
-            if (empty($tempUser->fileAttachment)) {
-                return $this->sendError("El registro no tiene un archivo adjunto asociado", [], 404);
-            }
-
-            if (!Storage::exists($tempUser->fileAttachment)) {
-                return $this->sendError("El archivo no existe en el servidor", [], 404);
-            }
-
-            $contentFile = Storage::get($tempUser->fileAttachment);
-            $fecha       = Carbon::now()->format('YmdHis');
-            $nameFile    = "reporte_usuarios_{$fecha}.xlsx";
-            $base64      = base64_encode($contentFile);
-
-            return $this->sendResponse([
-                'filename' => $nameFile,
-                'mime'     => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                'base64'   => $base64
-            ], 'Reporte generado correctamente');
+            // Siempre se regenera: un adjunto historico puede contener
+            // comisiones que luego fueron anuladas.
+            return $this->generateExcelReportRealTime($reportDate);
 
         } catch (Exception $e) {
             return $this->sendError($e->getMessage(), [], 402);
@@ -145,17 +123,24 @@ class FinanceController extends BaseController
     {
         $month = $date->format('m');
         $year  = $date->format('Y');
+        $from  = $date->copy()->startOfMonth();
+        $to    = $date->copy()->endOfMonth();
 
-        $userList                  = User::where("is_admin", false)->get();
+        $userList = User::orderBy('is_admin')->orderBy('name')->get();
         $paymentOrderPoints = PaymentOrderPoint::whereMonth('created_at', $month)
             ->whereYear('created_at', $year)
+            ->where('state', true)
             ->get();
         $paymentProductOrderPoints = PaymentProductOrderPoint::whereMonth('created_at', $month)
             ->whereYear('created_at', $year)
+            ->where('state', true)
             ->get();
         $ranges                    = Range::where("state", true)->orderBy('points', 'asc')->get();
+        $ledger                    = app(FinancialLedgerService::class);
 
         $excelBody = [];
+        $global = ['personal' => 0.0, 'patrocinio' => 0.0, 'cobrado' => 0.0,
+            'residual' => 0.0, 'infinito' => 0.0, 'total' => 0.0];
 
         foreach ($userList as $user) {
             $payment = PaymentLog::with(['paymentOrder.pack'])
@@ -163,12 +148,24 @@ class FinanceController extends BaseController
                 ->whereIn('state', [PaymentLog::PAGADO, PaymentLog::TERMINADO])
                 ->orderBy('created_at', 'desc')
                 ->first();
+            $productPayment = PaymentProductOrder::with('pack')
+                ->where('user_id', $user->id)
+                ->whereIn('state', [
+                    PaymentProductOrder::PAGADO,
+                    PaymentProductOrder::ENVIADO,
+                    PaymentProductOrder::TERMINADO,
+                ])
+                ->latest('created_at')
+                ->first();
+            $latestPackagePayment = collect([$payment, $productPayment])
+                ->filter()->sortByDesc('created_at')->first();
 
             $calculator = $this->pointCalculator->points(
                 $user->uuid,
                 $paymentOrderPoints,
                 $paymentProductOrderPoints->where('user_id', $user->id)
             );
+            $commissions = $ledger->summary($from, $to, $user->uuid);
 
             $totalPoints = $calculator->personal + $calculator->pointGroup;
 
@@ -182,22 +179,55 @@ class FinanceController extends BaseController
                 }
             }
 
+            $personalBonus = 0.0;
+            $sponsorship = (float) $commissions['patrocinio'];
+            $sponsorshipCollected = 0.0;
+            $residual = (float) $commissions['residual'];
+            $infinity = (float) $commissions['infinito'];
+            $payable = round($personalBonus + $sponsorship + $residual + $infinity, 2);
+            $planPoints = (float) ($latestPackagePayment?->paymentOrder?->pack?->points
+                ?? $latestPackagePayment?->pack?->points
+                ?? 0);
+            $personalPurchasePoints = (float) $paymentProductOrderPoints
+                ->where('user_id', $user->id)->sum('points');
+            $status = !$latestPackagePayment ? 'Sin plan'
+                : (in_array((int) $latestPackagePayment->state, [
+                    PaymentLog::PAGADO,
+                    PaymentProductOrder::ENVIADO,
+                ], true) ? 'Activo' : 'Inactivo');
+
+            $global['personal'] += $personalBonus;
+            $global['patrocinio'] += $sponsorship;
+            $global['cobrado'] += $sponsorshipCollected;
+            $global['residual'] += $residual;
+            $global['infinito'] += $infinity;
+            $global['total'] += $payable;
+
             $excelBody[] = [
                 $user->name,
                 $user->uuid,
-                $payment ? ($payment->state == PaymentLog::PAGADO ? "Activo" : "Inactivo") : "Sin plan",
-                $payment?->paymentOrder?->pack?->title ?? "Sin plan",
-                $calculator->pointAfiliado ?? 0,
-                $calculator->patrocinio ?? 0,
-                $calculator->residual ?? 0,
-                ($calculator->pointAfiliado ?? 0) + ($calculator->patrocinio ?? 0) + ($calculator->residual ?? 0) + ($calculator->infinito ?? 0),
-                $calculator->compra->total_puntos ?? 0,
-                $calculator->personal ?? 0,
-                $calculator->infinito ?? 0,
-                $totalPoints,
+                $status,
+                $user->package_name,
+                $personalBonus,
+                $sponsorship,
+                $sponsorshipCollected,
+                $residual,
+                $payable,
+                $planPoints,
+                $personalPurchasePoints,
+                $infinity,
+                $payable,
                 $rangeCurrent?->title ?? "Sin rango"
             ];
         }
+
+        $excelBody[] = [
+            'TOTAL GENERAL EMPRESA', '', '', '',
+            round($global['personal'], 2), round($global['patrocinio'], 2),
+            round($global['cobrado'], 2), round($global['residual'], 2),
+            round($global['total'], 2), '', '', round($global['infinito'], 2),
+            round($global['total'], 2), '',
+        ];
 
         $fecha        = Carbon::now()->format('YmdHis');
         $nameFile     = "reporte_usuarios_{$fecha}.xlsx";
@@ -395,6 +425,9 @@ class FinanceController extends BaseController
             $mes   = $fechaActual->translatedFormat('F');
             $año   = $fechaActual->format('Y');
             $month = $fechaActual->format('m');
+            $from  = $fechaActual->copy()->startOfMonth();
+            $to    = $fechaActual->copy()->endOfMonth();
+            $ledgerService = app(FinancialLedgerService::class);
 
             $subject = "Resumen General de puntos y bonos del último mes - Imperio Global";
 
@@ -402,7 +435,6 @@ class FinanceController extends BaseController
                 if ($user->is_admin) {
                     $jsonBody = [];
                     foreach ($userList as $keyTemp => $_user) {
-                        if ($_user->is_admin) continue;
                         $_user          = (object) $_user;
                         $_user->payment = PaymentLog::with(['paymentOrder.pack'])->where("user_id",  $_user->id)
                             ->where(function ($query) {
@@ -411,27 +443,38 @@ class FinanceController extends BaseController
                             })
                             ->orderBy('created_at', 'desc')
                             ->first();
+                        $productPayment = PaymentProductOrder::with('pack')
+                            ->where('user_id', $_user->id)
+                            ->whereIn('state', [PaymentProductOrder::PAGADO, PaymentProductOrder::ENVIADO, PaymentProductOrder::TERMINADO])
+                            ->latest('created_at')->first();
+                        $latestPackagePayment = collect([$_user->payment, $productPayment])
+                            ->filter()->sortByDesc('created_at')->first();
 
                         $paymentProductOrderPoints = PaymentProductOrderPoint::where("user_id", $_user->id)->where("state", true)->get();
 
                         $calculator      = $this->pointCalculator->points($_user->uuid, $paymentOrderPoints, $paymentProductOrderPoints);
                         $calculatorPoint = $this->pointCalculator->pointsTotal($_user->uuid, $paymentOrderPoints, $paymentProductOrderPoints);
+                        $commissions     = $ledgerService->summary($from, $to, $_user->uuid);
 
                         array_push($jsonBody, (object) [
                             "fullname"           => $_user->name,
                             "email"              => $_user->email,
                             "uuid"               => $_user->uuid,
-                            "pack"               => $_user->payment?->paymentOrder?->pack?->title ?? "Sin Plan",
-                            "status"             => $_user->payment == null ? "--" : ($_user->payment->state == PaymentLog::PAGADO ? "Activo" : "Inactivo"),
+                            "pack"               => $_user->package_name,
+                            "status"             => $_user->active ? "Activo" : "Inactivo",
                             "totalPoint"         => $calculatorPoint,
+                            "planPoints"         => (float) ($latestPackagePayment?->paymentOrder?->pack?->points
+                                ?? $latestPackagePayment?->pack?->points ?? 0),
+                            "personalPurchasePoints" => (float) $paymentProductOrderPoints->sum('points'),
                             "range"              => $_user->range == null ? "Sin Rango" : $_user->range->range->title,
                             "points"             => (object) [
-                                "patrocinio"     => $calculator->patrocinio,
-                                "residual"       => $calculator->residual,
+                                "patrocinio"     => $commissions['patrocinio'],
+                                "patrocinioCobrado" => 0,
+                                "residual"       => $commissions['residual'],
                                 "compra"         => $calculator->compra,
                                 "pointGroup"     => $calculator->pointGroup,
                                 "personal"       => $calculator->personal,
-                                "infinito"       => $calculator->infinito,
+                                "infinito"       => $commissions['infinito'],
                                 "pointAfiliado"  => $calculator->pointAfiliado,
                                 "personalGlobal" => $calculator->personalGlobal
                             ],
@@ -439,7 +482,20 @@ class FinanceController extends BaseController
                     }
 
                     $excelBody = [];
+                    $companyTotals = [
+                        'personal' => 0,
+                        'patrocinio' => 0,
+                        'patrocinio_cobrado' => 0,
+                        'residual' => 0,
+                        'infinito' => 0,
+                        'gran_total' => 0,
+                    ];
                     foreach ($jsonBody as $key => $json) {
+                        $payableTotal = (($json->points?->pointAfiliado ?? 0)
+                            + ($json->points?->patrocinio ?? 0)
+                            + ($json->points?->residual ?? 0)
+                            + ($json->points?->infinito ?? 0));
+
                         array_push($excelBody, [
                             $json->fullname,
                             $json->uuid,
@@ -447,19 +503,36 @@ class FinanceController extends BaseController
                             $json->pack,
                             $json->points?->pointAfiliado ?? 0,
                             $json->points?->patrocinio ?? 0,
+                            $json->points?->patrocinioCobrado ?? 0,
                             $json->points?->residual ?? 0,
-                            (($json->points?->pointAfiliado ?? 0)
-                                + ($json->points?->patrocinio ?? 0)
-                                + ($json->points?->residual ?? 0)
-                                + ($json->points?->infinito ?? 0)
-                            ),
-                            $json->points?->compra ?? 0,
-                            $json->points->personal ?? 0,
+                            $payableTotal,
+                            $json->planPoints,
+                            $json->personalPurchasePoints,
                             $json->points->infinito ?? 0,
-                            $json->totalPoint,
+                            $payableTotal,
                             $json->range
                         ]);
+
+                        $companyTotals['personal'] += $json->points?->pointAfiliado ?? 0;
+                        $companyTotals['patrocinio'] += $json->points?->patrocinio ?? 0;
+                        $companyTotals['patrocinio_cobrado'] += $json->points?->patrocinioCobrado ?? 0;
+                        $companyTotals['residual'] += $json->points?->residual ?? 0;
+                        $companyTotals['infinito'] += $json->points?->infinito ?? 0;
+                        $companyTotals['gran_total'] += $payableTotal;
                     }
+
+                    $excelBody[] = [
+                        'TOTAL GENERAL EMPRESA', '', '', '',
+                        $companyTotals['personal'],
+                        $companyTotals['patrocinio'],
+                        $companyTotals['patrocinio_cobrado'],
+                        $companyTotals['residual'],
+                        $companyTotals['gran_total'],
+                        0, 0,
+                        $companyTotals['infinito'],
+                        $companyTotals['gran_total'],
+                        '',
+                    ];
 
                     $fecha    = Carbon::now()->format('YmdHis');
                     $nameFile = "exports/reporte_usuarios_{$fecha}.xlsx";
@@ -486,6 +559,12 @@ class FinanceController extends BaseController
                         })
                         ->orderBy('created_at', 'desc')
                         ->first();
+                    $productPayment = PaymentProductOrder::with('pack')
+                        ->where('user_id', $user->id)
+                        ->whereIn('state', [PaymentProductOrder::PAGADO, PaymentProductOrder::ENVIADO, PaymentProductOrder::TERMINADO])
+                        ->latest('created_at')->first();
+                    $latestPackagePayment = collect([$user->payment, $productPayment])
+                        ->filter()->sortByDesc('created_at')->first();
 
                     if ($user->payment == null) continue;
 
@@ -493,19 +572,24 @@ class FinanceController extends BaseController
 
                     $calculator           = $this->pointCalculator->points($user->uuid, $paymentOrderPoints, $paymentProductOrderPoints);
                     $calculatorTotalPoint = $this->pointCalculator->pointsTotal($user->uuid, $paymentOrderPoints, $paymentProductOrderPoints);
+                    $commissions          = $ledgerService->summary($from, $to, $user->uuid);
 
                     $jsonBody = [
                         "email"              => $user->email,
                         "range"              => $user->range == null ? "Sin Rango" : $user->range->range->title,
-                        "pack"               => $user->payment?->paymentOrder?->pack?->title ?? "Sin Plan",
-                        "status"             => $user->payment == null ? "--" : ($user->payment->state == PaymentLog::PAGADO ? "Activo" : "Inactivo"),
+                        "pack"               => $user->package_name,
+                        "status"             => $user->active ? "Activo" : "Inactivo",
+                        "planPoints"         => (float) ($latestPackagePayment?->paymentOrder?->pack?->points
+                            ?? $latestPackagePayment?->pack?->points ?? 0),
+                        "personalPurchasePoints" => (float) $paymentProductOrderPoints->sum('points'),
                         "points"             => (object) [
-                            "patrocinio"     => $calculator->patrocinio,
-                            "residual"       => $calculator->residual,
+                            "patrocinio"     => $commissions['patrocinio'],
+                            "patrocinioCobrado" => 0,
+                            "residual"       => $commissions['residual'],
                             "compra"         => $calculator->compra,
                             "pointGroup"     => $calculator->pointGroup,
                             "personal"       => $calculator->personal,
-                            "infinito"       => $calculator->infinito,
+                            "infinito"       => $commissions['infinito'],
                             "pointAfiliado"  => $calculator->pointAfiliado,
                             "personalGlobal" => $calculator->personalGlobal
                         ],

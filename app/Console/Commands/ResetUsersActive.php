@@ -12,6 +12,7 @@ use App\Models\PaymentOrderPoint;
 use App\Models\RangeUser;
 use App\Models\PaymentProductOrderPoint;
 use App\Services\Core\Calculator;
+use App\Services\Core\FinancialLedgerService;
 use App\Models\PaymentLog;
 use App\Models\UserEmailTemp;
 use App\Models\PaymentProductOrder;
@@ -76,6 +77,9 @@ class ResetUsersActive extends Command
             $mes = $oneMonthAgo->translatedFormat('F'); // o 'F' para nombre del mes
             $año = $oneMonthAgo->format('Y');
             $month = $oneMonthAgo->format('m');
+            $from = $oneMonthAgo->copy()->startOfMonth();
+            $to = $oneMonthAgo->copy()->endOfMonth();
+            $ledger = app(FinancialLedgerService::class);
 
             $subject = "Resumen General de puntos y bonos del último mes - Imperio Global";
 
@@ -92,11 +96,20 @@ class ResetUsersActive extends Command
                         })
                         ->orderBy('created_at', 'desc')
                         ->first();
+                        $productPayment = PaymentProductOrder::with('pack')
+                            ->where('user_id', $_user->id)
+                            ->whereIn('state', [PaymentProductOrder::PAGADO, PaymentProductOrder::ENVIADO, PaymentProductOrder::TERMINADO])
+                            ->latest('created_at')->first();
+                        $latestPackagePayment = collect([$_user->payment, $productPayment])
+                            ->filter()->sortByDesc('created_at')->first();
 
                         $paymentProductOrderPoints = PaymentProductOrderPoint::where("user_id" , $_user->id)->where("state" , true)->get();
 
-                        $calculator = $this->calculator->points( $_user->uuid , $paymentOrderPoints , $paymentProductOrderPoints );
-                        $calculatorPoint = $this->calculator->pointsTotal( $_user->uuid , $paymentOrderPoints , $paymentProductOrderPoints );
+                        $calculator = $this->calculator->points($_user->uuid, $paymentOrderPoints,
+                            $paymentProductOrderPoints, (int) $month, (int) $año);
+                        $calculatorPoint = $this->calculator->pointsTotal($_user->uuid, $paymentOrderPoints,
+                            $paymentProductOrderPoints, (int) $month, (int) $año);
+                        $commissions = $ledger->summary($from, $to, $_user->uuid);
                         
                         array_push( $jsonBody , (object) array(
                             "fullname" => $_user->name,
@@ -105,14 +118,17 @@ class ResetUsersActive extends Command
                             "pack" => $_user->payment?->paymentOrder?->pack?->title ?? "Sin Plan",
                             "status" => $_user->payment == null ? "--" : ( $_user->payment->state == PaymentLog::PAGADO ? "Activo" : "Inactivo" ),
                             "totalPoint" => $calculatorPoint,
+                            "planPoints" => (float) ($latestPackagePayment?->paymentOrder?->pack?->points
+                                ?? $latestPackagePayment?->pack?->points ?? 0),
+                            "personalPurchasePoints" => (float) $paymentProductOrderPoints->sum('points'),
                             "range" => $_user->range == null ? "Sin Rango" : $_user->range->range->title,
                             "points" => (object) array(
-                                "patrocinio"    => $calculator->patrocinio,
-                                "residual"      => $calculator->residual,
+                                "patrocinio"    => $commissions['patrocinio'],
+                                "residual"      => $commissions['residual'],
                                 "compra"        => $calculator->compra,
                                 "pointGroup"    => $calculator->pointGroup,
                                 "personal"      => $calculator->personal,
-                                "infinito"      => $calculator->infinito,
+                                "infinito"      => $commissions['infinito'],
                                 "pointAfiliado" => $calculator->pointAfiliado,
                                 "personalGlobal" => $calculator->personalGlobal
                             ),
@@ -123,8 +139,18 @@ class ResetUsersActive extends Command
 
                     // crear archivo excel
                     $excelBody = array();
+                    $globalPatrocinio = 0.0;
+                    $globalResidual = 0.0;
+                    $globalInfinito = 0.0;
 
                     foreach ($jsonBody as $key => $json) {
+                        $payable = (float) ($json->points?->pointAfiliado ?? 0)
+                            + (float) ($json->points?->patrocinio ?? 0)
+                            + (float) ($json->points?->residual ?? 0)
+                            + (float) ($json->points?->infinito ?? 0);
+                        $globalPatrocinio += (float) ($json->points?->patrocinio ?? 0);
+                        $globalResidual += (float) ($json->points?->residual ?? 0);
+                        $globalInfinito += (float) ($json->points?->infinito ?? 0);
                         array_push(
                             $excelBody,
                             array(
@@ -136,19 +162,21 @@ class ResetUsersActive extends Command
                                 $json->points?->patrocinio ?? 0,
                                 0,
                                 $json->points?->residual ?? 0,
-                                ( ($json->points?->pointAfiliado ?? 0) 
-                                    + ($json->points?->patrocinio ?? 0) 
-                                    + ($json->points?->residual ?? 0) 
-                                    + ($json->points?->infinito ?? 0)
-                                ),
-                                $json->points?->compra ?? 0,
-                                $json->points->personal ?? 0,
+                                $payable,
+                                $json->planPoints,
+                                $json->personalPurchasePoints,
                                 $json->points->infinito ?? 0,
-                                $json->totalPoint,
+                                $payable,
                                 $json->range
                             )
                         );
                     }
+
+                    $globalPayable = $globalPatrocinio + $globalResidual + $globalInfinito;
+                    $excelBody[] = ['TOTAL GENERAL EMPRESA', '', '', '', 0,
+                        round($globalPatrocinio, 2), 0, round($globalResidual, 2),
+                        round($globalPayable, 2), '', '', round($globalInfinito, 2),
+                        round($globalPayable, 2), ''];
 
                     // 1. Guardar Excel
                     $fecha = Carbon::now()->format('YmdHis');
@@ -184,8 +212,11 @@ class ResetUsersActive extends Command
 
                     $paymentProductOrderPoints = PaymentProductOrderPoint::where("user_id" , $user->id)->where("state" , true)->get();
 
-                    $calculator = $this->calculator->points( $user->uuid , $paymentOrderPoints , $paymentProductOrderPoints );
-                    $calculatorTotalPoint = $this->calculator->pointsTotal( $user->uuid , $paymentOrderPoints , $paymentProductOrderPoints );
+                    $calculator = $this->calculator->points($user->uuid, $paymentOrderPoints,
+                        $paymentProductOrderPoints, (int) $month, (int) $año);
+                    $calculatorTotalPoint = $this->calculator->pointsTotal($user->uuid, $paymentOrderPoints,
+                        $paymentProductOrderPoints, (int) $month, (int) $año);
+                    $commissions = $ledger->summary($from, $to, $user->uuid);
                     
                     $jsonBody = array(
                         "email" => $user->email,
@@ -193,12 +224,12 @@ class ResetUsersActive extends Command
                         "pack" => $user->payment?->paymentOrder?->pack?->title ?? "Sin Plan",
                         "status" => $user->payment == null ? "--" : ( $user->payment->state == PaymentLog::PAGADO ? "Activo" : "Inactivo" ),
                         "points" => (object) array(
-                            "patrocinio"    => $calculator->patrocinio,
-                            "residual"      => $calculator->residual,
+                            "patrocinio"    => $commissions['patrocinio'],
+                            "residual"      => $commissions['residual'],
                             "compra"        => $calculator->compra,
                             "pointGroup"    => $calculator->pointGroup,
                             "personal"      => $calculator->personal,
-                            "infinito"      => $calculator->infinito,
+                            "infinito"      => $commissions['infinito'],
                             "pointAfiliado" => $calculator->pointAfiliado,
                             "personalGlobal" => $calculator->personalGlobal,
                             "patrocinioRequest" => $calculator->patrocinioRequest,

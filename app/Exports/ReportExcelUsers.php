@@ -56,7 +56,15 @@ class ReportExcelUsers implements FromArray, WithHeadings, WithEvents
                 ]);
 
                 // Ancho automático de columnas
-                foreach (range('A', 'M') as $col) {
+                foreach (['E', 'F', 'G', 'H', 'I', 'L', 'M'] as $col) {
+                    $event->sheet->getStyle("{$col}2:{$col}".$event->sheet->getHighestRow())
+                        ->getNumberFormat()->setFormatCode('#,##0.00');
+                }
+
+                $lastRow = $event->sheet->getHighestRow();
+                $event->sheet->getStyle("A{$lastRow}:N{$lastRow}")->getFont()->setBold(true);
+
+                foreach (range('A', 'N') as $col) {
                     $event->sheet->getDelegate()->getColumnDimension($col)->setAutoSize(true);
                 }
             }
