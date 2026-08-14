@@ -13,7 +13,8 @@ $schedule = app(Schedule::class);
 
 $schedule->command('app:reset-users-active')
     ->timezone('America/Lima')
-    ->monthlyOn(3, '01:00');
+    ->monthlyOn(3, '01:00')
+    ->withoutOverlapping();
 
 $schedule->command('app:range-list-bulk')
     ->timezone('America/Lima')

@@ -69,9 +69,11 @@ class ResetUsersActive extends Command
 
             $paymentOrderPoints = PaymentOrderPoint::with(['paymentOrder'])->where('state' , true)->get();
 
-            $fechaActual = Carbon::now();
+            $fechaActual = Carbon::now('America/Lima');
 
-            $oneMonthAgo = $fechaActual->subMonth();
+            // El cierre corre el dia 3, despues de los dos dias de gracia.
+            // subMonthNoOverflow evita desbordes entre meses de distinta duracion.
+            $oneMonthAgo = $fechaActual->copy()->subMonthNoOverflow();
 
             // Obtener mes y año
             $mes = $oneMonthAgo->translatedFormat('F'); // o 'F' para nombre del mes
@@ -90,6 +92,7 @@ class ResetUsersActive extends Command
                     foreach ($userList as $keyTemp => $_user){
                         $_user = (object) $_user;
                         $_user->payment = PaymentLog::with(['paymentOrder.pack' ])->where( "user_id" ,  $_user->id )
+                        ->whereBetween('created_at', [$from, $to])
                         ->where( function ($query) {
                             $query->where('state' , PaymentLog::PAGADO)
                             ->orWhere('state' , PaymentLog::TERMINADO);
@@ -98,12 +101,14 @@ class ResetUsersActive extends Command
                         ->first();
                         $productPayment = PaymentProductOrder::with('pack')
                             ->where('user_id', $_user->id)
+                            ->whereBetween('created_at', [$from, $to])
                             ->whereIn('state', [PaymentProductOrder::PAGADO, PaymentProductOrder::ENVIADO, PaymentProductOrder::TERMINADO])
                             ->latest('created_at')->first();
                         $latestPackagePayment = collect([$_user->payment, $productPayment])
                             ->filter()->sortByDesc('created_at')->first();
 
-                        $paymentProductOrderPoints = PaymentProductOrderPoint::where("user_id" , $_user->id)->where("state" , true)->get();
+                        $paymentProductOrderPoints = PaymentProductOrderPoint::where("user_id" , $_user->id)
+                            ->where("state" , true)->whereBetween('created_at', [$from, $to])->get();
 
                         $calculator = $this->calculator->points($_user->uuid, $paymentOrderPoints,
                             $paymentProductOrderPoints, (int) $month, (int) $año);
@@ -115,8 +120,9 @@ class ResetUsersActive extends Command
                             "fullname" => $_user->name,
                             "email" => $_user->email,
                             "uuid" => $_user->uuid,
-                            "pack" => $_user->payment?->paymentOrder?->pack?->title ?? "Sin Plan",
-                            "status" => $_user->payment == null ? "--" : ( $_user->payment->state == PaymentLog::PAGADO ? "Activo" : "Inactivo" ),
+                            "pack" => $_user->package_name,
+                            "status" => app(\App\Services\Core\ActivationService::class)
+                                ->isActiveForPeriod($_user, $from, $to, true) ? "Activo" : "Inactivo",
                             "totalPoint" => $calculatorPoint,
                             "planPoints" => (float) ($latestPackagePayment?->paymentOrder?->pack?->points
                                 ?? $latestPackagePayment?->pack?->points ?? 0),
@@ -201,6 +207,7 @@ class ResetUsersActive extends Command
                     $user = (object) $user;
 
                     $user->payment = PaymentLog::with(['paymentOrder.pack' ])->where( "user_id" ,  $user->id )
+                        ->whereBetween('created_at', [$from, $to])
                         ->where( function ($query) {
                             $query->where('state' , PaymentLog::PAGADO)
                             ->orWhere('state' , PaymentLog::TERMINADO);
@@ -210,7 +217,8 @@ class ResetUsersActive extends Command
 
                     if( $user->payment == null ) continue;
 
-                    $paymentProductOrderPoints = PaymentProductOrderPoint::where("user_id" , $user->id)->where("state" , true)->get();
+                    $paymentProductOrderPoints = PaymentProductOrderPoint::where("user_id" , $user->id)
+                        ->where("state" , true)->whereBetween('created_at', [$from, $to])->get();
 
                     $calculator = $this->calculator->points($user->uuid, $paymentOrderPoints,
                         $paymentProductOrderPoints, (int) $month, (int) $año);
@@ -221,8 +229,9 @@ class ResetUsersActive extends Command
                     $jsonBody = array(
                         "email" => $user->email,
                         "range" => $user->range == null ? "Sin Rango" : $user->range->range->title,
-                        "pack" => $user->payment?->paymentOrder?->pack?->title ?? "Sin Plan",
-                        "status" => $user->payment == null ? "--" : ( $user->payment->state == PaymentLog::PAGADO ? "Activo" : "Inactivo" ),
+                        "pack" => $user->package_name,
+                        "status" => app(\App\Services\Core\ActivationService::class)
+                            ->isActiveForPeriod($user, $from, $to, true) ? "Activo" : "Inactivo",
                         "points" => (object) array(
                             "patrocinio"    => $commissions['patrocinio'],
                             "residual"      => $commissions['residual'],
@@ -252,20 +261,18 @@ class ResetUsersActive extends Command
             }
 
             PaymentLog::with(['paymentOrder'])->where('state' , PaymentLog::PAGADO)
+                ->whereBetween('created_at', [$from, $to])
                 ->update(array( "state" => PaymentLog::TERMINADO ));
 
             PaymentOrderPoint::where('state', true)
                 ->whereIn('type', [PaymentOrderPoint::COMPRA, PaymentOrderPoint::GRUPAL])
-                ->whereMonth('created_at', now()->month)
-                ->whereYear('created_at', now()->year)
+                ->whereBetween('created_at', [$from, $to])
                 ->update(["state" => false]);
-            PaymentProductOrder::where('state', PaymentProductOrder::PAGADO)
-                ->whereMonth('created_at', now()->month)
-                ->whereYear('created_at', now()->year)
+            PaymentProductOrder::whereIn('state', [PaymentProductOrder::PAGADO, PaymentProductOrder::ENVIADO])
+                ->whereBetween('created_at', [$from, $to])
                 ->update(["state" => PaymentProductOrder::TERMINADO]);
             PaymentProductOrderPoint::where('state', true)
-                ->whereMonth('created_at', now()->month)
-                ->whereYear('created_at', now()->year)
+                ->whereBetween('created_at', [$from, $to])
                 ->update(["state" => false]);
 
             RangeUser::where("status", true)->update( array("status" => false) );
