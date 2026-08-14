@@ -12,6 +12,7 @@ use Illuminate\Support\Facades\Cache;
 use App\Models\SponsorRelation;
 use App\Models\PaymentProductOrder;
 use App\Models\CommissionRule;
+use App\Models\ManualReactivation;
 
 class CommissionService
 {
@@ -193,9 +194,25 @@ class CommissionService
     public function confirmPointAfiliado($userCurrent, $points, $manualReactivationId = null, $paymentOrderId = null): array
 {
     $summary = ['generated_count' => 0, 'generated_amount' => 0.0, 'blocked' => []];
+    if ($manualReactivationId) {
+        $reactivation = ManualReactivation::find($manualReactivationId);
+        if (!$reactivation || (int) $reactivation->user_id !== (int) $userCurrent->id
+            || $reactivation->state !== ManualReactivation::ACTIVE) {
+            $summary['blocked'][] = ['reason' => 'source_reactivation_inactive'];
+            return $summary;
+        }
+    }
+
+    ActivationService::clearCache();
+    $userCurrent->refresh();
+    if (!$userCurrent->active) {
+        $summary['blocked'][] = ['reason' => 'source_user_inactive'];
+        return $summary;
+    }
+
     if (!$paymentOrderId) {
         $paymentOrderId = PaymentLog::where('user_id', $userCurrent->id)
-            ->whereIn('state', [PaymentLog::TERMINADO, PaymentLog::PAGADO])
+            ->where('state', PaymentLog::PAGADO)
             ->latest('created_at')->value('payment_order_id');
     }
     if (!$paymentOrderId) {

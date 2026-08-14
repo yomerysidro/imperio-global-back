@@ -93,32 +93,46 @@ class User extends Authenticatable
             return 'Corporativo';
         }
 
-        $packages = [];
+        $packagesByCategory = [];
+        $rememberLatestPack = function ($pack, $createdAt) use (&$packagesByCategory): void {
+            $category = mb_strtoupper(trim((string) ($pack->category ?: 'SIN_CATEGORIA')));
+            $timestamp = $createdAt?->getTimestamp() ?? 0;
+            if (!isset($packagesByCategory[$category]) || $timestamp >= $packagesByCategory[$category]['timestamp']) {
+                $packagesByCategory[$category] = [
+                    'title' => $pack->title,
+                    'timestamp' => $timestamp,
+                ];
+            }
+        };
         
         // 1. Membresía de Servicios Digitales (Estado 2 o 6)
         $services = PaymentLog::with('paymentOrder.pack')
             ->where('user_id', $this->id)
-            ->whereIn('state', [2, 6])
+            ->where('state', PaymentLog::PAGADO)
+            ->orderBy('created_at')
             ->get();
         foreach ($services as $log) {
             if ($log->paymentOrder && $log->paymentOrder->pack) {
-                $packages[] = $log->paymentOrder->pack->title;
+                $pack = $log->paymentOrder->pack;
+                $rememberLatestPack($pack, $log->created_at);
             }
         }
 
         // 2. Packs de Productos (Estado 2, 3 o 6)
         $products = PaymentProductOrder::with('pack')
             ->where('user_id', $this->id)
-            ->whereIn('state', [2, 3, 6])
+            ->whereIn('state', [PaymentProductOrder::PAGADO, PaymentProductOrder::ENVIADO])
+            ->orderBy('created_at')
             ->get();
         foreach ($products as $order) {
             if ($order->pack) {
-                $packages[] = $order->pack->title;
+                $rememberLatestPack($order->pack, $order->created_at);
             }
         }
 
-        // Eliminar duplicados y unir nombres
-        $uniquePackages = array_unique($packages);
+        // Dentro de una categoria prevalece el paquete mas reciente. Los
+        // paquetes de categorias diferentes si se presentan en conjunto.
+        $uniquePackages = array_values(array_unique(array_column($packagesByCategory, 'title')));
         return count($uniquePackages) > 0 ? implode(' + ', $uniquePackages) : 'Sin paquetes registrados';
     }
 

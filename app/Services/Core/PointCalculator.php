@@ -53,6 +53,7 @@ class PointCalculator
             'infinito'            => $infinito,
             'bono'                => $patrocinio,
             'bono_total'          => $patrocinio + $residual + $infinito,
+            'bonos_totales'       => $patrocinio + $residual + $infinito,
             'pointAfiliado'       => $pointAfiliado,
             'personalGlobal'      => $personalGlobal,
             'puntos_personales'   => $personal,
