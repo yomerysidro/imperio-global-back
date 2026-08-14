@@ -43,11 +43,17 @@ class FinancialLedgerService
         $residual = $sum($active, ['R', 'RS']);
         $infinito = $sum($active, ['I']);
 
+        $bonoTotal = round($patrocinio + $residual + $infinito, 2);
+
         return [
             'patrocinio' => $patrocinio,
+            'bono' => $patrocinio,
             'residual' => $residual,
             'infinito' => $infinito,
-            'total_comisiones' => round($patrocinio + $residual + $infinito, 2),
+            'bono_total' => $bonoTotal,
+            'bonos_totales' => $bonoTotal,
+            'total_comisiones' => $bonoTotal,
+            'ganancia_total' => $bonoTotal,
             'movimientos_validos' => $active->count(),
             'movimientos_anulados' => $rows->where('state', false)->count(),
         ];

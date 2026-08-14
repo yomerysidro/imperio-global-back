@@ -26,7 +26,7 @@ class ActivationService
         $service = DB::table('payment_logs as logs')->join('payment_orders as orders', 'orders.id', '=', 'logs.payment_order_id')
             ->join('packs', 'packs.id', '=', 'orders.pack_id')->where('logs.user_id', $user->id)
             ->where('logs.state', PaymentLog::PAGADO)->whereBetween('logs.created_at', [$from, $to])
-            ->selectRaw("COALESCE(SUM({$prefix}packs.points), 0) points, COALESCE(SUM({$prefix}orders.amount), 0) amount")->first();
+            ->selectRaw("COALESCE(SUM({$prefix}packs.points), 0) points, COALESCE(SUM(CASE WHEN {$prefix}orders.amount > 0 THEN {$prefix}orders.amount ELSE {$prefix}packs.price END), 0) amount")->first();
         $product = DB::table('payment_product_orders as orders')
             ->where('orders.user_id', $user->id)
             ->whereIn('orders.state', [PaymentProductOrder::PAGADO, PaymentProductOrder::ENVIADO])
@@ -39,10 +39,24 @@ class ActivationService
             ->whereBetween('orders.created_at', [$from, $to])
             ->selectRaw("COALESCE(SUM({$prefix}details.quantity), 0) products")->first();
         $products = (int) ($productCount->products ?? 0);
-        $points = (float) ($service->points ?? 0) + (float) ($product->points ?? 0);
-        $amount = (float) ($service->amount ?? 0) + (float) ($product->amount ?? 0);
-        return self::$activeCache[$cacheKey] = $rules->contains(fn (ActivationRule $rule) => $points >= $rule->minimum_points
-            && $amount >= $rule->minimum_amount && $products >= $rule->minimum_products);
+        $servicePoints = (float) ($service->points ?? 0);
+        $serviceAmount = (float) ($service->amount ?? 0);
+        $productPoints = (float) ($product->points ?? 0);
+        $productAmount = (float) ($product->amount ?? 0);
+
+        return self::$activeCache[$cacheKey] = $rules->contains(function (ActivationRule $rule) use (
+            $servicePoints, $serviceAmount, $productPoints, $productAmount, $products
+        ) {
+            // Un paquete activa por sus puntos y valor configurado. Una compra
+            // mensual de productos debe cumplir ademas la cantidad requerida.
+            $serviceQualifies = $servicePoints >= $rule->minimum_points
+                && $serviceAmount >= $rule->minimum_amount;
+            $productQualifies = $productPoints >= $rule->minimum_points
+                && $productAmount >= $rule->minimum_amount
+                && $products >= $rule->minimum_products;
+
+            return $serviceQualifies || $productQualifies;
+        });
     }
 
     public static function clearCache(): void { self::$activeCache = []; }
