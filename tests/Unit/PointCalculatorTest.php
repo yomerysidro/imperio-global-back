@@ -51,6 +51,47 @@ class PointCalculatorTest extends TestCase
         $this->assertSame(86, $result->bono_total);
     }
 
+    public function test_it_keeps_legitimate_commissions_from_different_sources_and_ignores_inactive_rows(): void
+    {
+        $firstSource = $this->point('USR1', 'R', 18);
+        $firstSource->id = 1; $firstSource->payment_order_id = 'ORDER-1';
+        $firstSource->source_user_code = 'SOURCE-A'; $firstSource->level = 1;
+
+        $secondSource = $this->point('USR1', 'R', 14);
+        $secondSource->id = 2; $secondSource->payment_order_id = 'ORDER-1';
+        $secondSource->source_user_code = 'SOURCE-B'; $secondSource->level = 2;
+
+        $inactive = $this->point('USR1', 'R', 1000);
+        $inactive->id = 3; $inactive->payment_order_id = 'ORDER-2';
+        $inactive->source_user_code = 'SOURCE-C'; $inactive->level = 1;
+        $inactive->state = false;
+
+        $result = (new PointCalculator())->points(
+            'USR1',
+            collect([$firstSource, $secondSource, $inactive]),
+            collect()
+        );
+
+        $this->assertSame(32, $result->residual);
+        $this->assertSame(32, $result->bono_total);
+    }
+
+    public function test_it_keeps_the_original_entry_instead_of_the_largest_duplicate(): void
+    {
+        $original = $this->point('USR1', 'P', 40);
+        $original->id = 1; $original->payment_order_id = 'ORDER-1';
+        $original->source_user_code = 'SOURCE-A'; $original->level = 1;
+
+        $inflatedRetry = $this->point('USR1', 'P', 90);
+        $inflatedRetry->id = 2; $inflatedRetry->payment_order_id = 'ORDER-1';
+        $inflatedRetry->source_user_code = 'SOURCE-A'; $inflatedRetry->level = 1;
+
+        $result = (new PointCalculator())->points('USR1', collect([$original, $inflatedRetry]), collect());
+
+        $this->assertSame(40, $result->patrocinio);
+        $this->assertSame(40, $result->bono_total);
+    }
+
     private function point(string $userCode, string $type, int $amount): PaymentOrderPoint
     {
         return new PaymentOrderPoint([

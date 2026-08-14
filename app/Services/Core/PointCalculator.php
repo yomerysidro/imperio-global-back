@@ -17,18 +17,24 @@ class PointCalculator
             return strtoupper($point->user_code) === strtoupper($userUuid);
         })->values();
 
-        $commissions = $userPoints->whereIn('type', ['P', 'PS', 'S', 'R', 'RS', 'I'])
+        $commissions = $userPoints->where('state', true)
+            ->whereIn('type', ['P', 'PS', 'S', 'R', 'RS', 'I'])
             ->groupBy(function ($point) {
                 $type = $point->type === 'S' ? 'PS' : $point->type;
-                return implode('|', [$point->payment_order_id ?: 'ROW-'.$point->id, strtoupper($point->user_code),
-                    (int) ($point->level ?? 0), $type]);
-            })->map(fn ($rows) => $rows->sortByDesc('point')->first())->values();
+                return implode('|', [
+                    $point->payment_order_id ?: 'ROW-'.$point->id,
+                    strtoupper((string) $point->user_code),
+                    strtoupper((string) ($point->source_user_code ?? '')),
+                    $type,
+                    (int) ($point->level ?? 0),
+                    (int) ($point->manual_reactivation_id ?? 0),
+                ]);
+            })->map(fn ($rows) => $rows->first())->values();
 
         $patrocinioProducto = $commissions->where('type', PaymentOrderPoint::PATROCINIO)->sum('point');
         $patrocinioServicio = $commissions
             ->whereIn('type', [PaymentOrderPoint::PATROCINIO_SERVICIO, 'S'])
-            ->groupBy(fn ($point) => $point->payment_order_id ?: 'ROW-'.$point->id)
-            ->sum(fn ($rows) => $rows->max('point'));
+            ->sum('point');
         $patrocinio = $patrocinioProducto + $patrocinioServicio;
         $residualProducto = $commissions->where('type', PaymentOrderPoint::RESIDUAL)->sum('point');
         $residualServicio = $commissions->where('type', PaymentOrderPoint::RESIDUAL_SERVICIO)->sum('point');

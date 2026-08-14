@@ -123,7 +123,10 @@ class Calculator
             if ($userCodeUpper === $userCodeOrden && in_array($tipoFila, self::TIPOS_PATROCINIO)) {
                 // PS es el tipo vigente y S es su alias historico: nunca se pagan dos veces.
                 $canonicalType = in_array($tipoFila, ['PS', 'S'], true) ? 'PS' : $tipoFila;
-                $key = "ganancia_{$orderId}_{$canonicalType}";
+                $key = implode('|', ['ganancia', $orderId, $canonicalType,
+                    strtoupper((string) ($orderPoint->source_user_code ?? '')),
+                    (int) ($orderPoint->level ?? 0),
+                    (int) ($orderPoint->manual_reactivation_id ?? 0)]);
                 if (!isset($processedGanancia[$key])) {
                     $categoria = $this->resolvePackCategory($packId, $orderId);
                     if ($tipoFila === 'P') {
@@ -139,7 +142,10 @@ class Calculator
             // C. BONOS RESIDUALES
             // =========================================================
             if ($userCodeUpper === $userCodeOrden && in_array($tipoFila, self::TIPOS_RESIDUAL)) {
-                $key = "residual_{$orderId}_{$tipoFila}";
+                $key = implode('|', ['residual', $orderId, $tipoFila,
+                    strtoupper((string) ($orderPoint->source_user_code ?? '')),
+                    (int) ($orderPoint->level ?? 0),
+                    (int) ($orderPoint->manual_reactivation_id ?? 0)]);
                 if (!isset($processedGanancia[$key])) {
                     $categoria = $this->resolvePackCategory($packId, $orderId);
                     if ($tipoFila === 'R') {
