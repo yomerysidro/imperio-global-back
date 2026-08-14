@@ -32,6 +32,7 @@ use App\Models\ResidualPoint;
 
 use App\Services\Core\FileUpload;
 use App\Services\Core\CommissionService;
+use Carbon\Carbon;
 
 
 class PaymentProductOrderController extends BaseController
@@ -103,9 +104,29 @@ class PaymentProductOrderController extends BaseController
             $userId = Auth::id();
             $userModel = User::with([])->find($userId);
 
+            $validator = Validator::make($request->query(), [
+                'month' => 'nullable|integer|between:1,12',
+                'year' => 'nullable|integer|min:2000|max:2100',
+            ]);
+            if ($validator->fails()) {
+                return $this->sendError('Error de validacion.', $validator->errors(), 422);
+            }
+
+            $month = (int) $request->query('month', Carbon::now()->month);
+            $year = (int) $request->query('year', Carbon::now()->year);
+
             // $userDetail = UserDetail::where("user_id" , $user_id)->first();
 
-            $paymentProductOrderList = PaymentProductOrderDetail::with(['paymentProductOrder']);
+            $paymentProductOrderList = PaymentProductOrderDetail::with(['paymentProductOrder'])
+                ->whereMonth('created_at', $month)
+                ->whereYear('created_at', $year)
+                ->whereHas('paymentProductOrder', function ($query) {
+                    $query->whereNotIn('state', [
+                        PaymentProductOrder::ANULADO,
+                        PaymentProductOrder::ERROR,
+                        PaymentProductOrder::TERMINADO,
+                    ]);
+                });
 
 
             // if( $request->has('code') ) if( !empty($request->query('code')) ) $userList = $userList->where("uuid" , 'like' , $request->query('code') );

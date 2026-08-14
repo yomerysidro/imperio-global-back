@@ -916,7 +916,6 @@ class FinanceController extends BaseController
                 DB::rollBack();
                 return $this->sendError('No existe el usuario seleccionado', [], 404);
             }
-            $this->reconcileManualReactivations($userCurrent);
             $reactivation = ManualReactivation::where('user_id', $userCurrent->id)
                 ->where('state', ManualReactivation::ACTIVE)->latest('id')->lockForUpdate()->first();
             if (!$reactivation) {
@@ -986,9 +985,10 @@ class FinanceController extends BaseController
         if (!Auth::user()?->is_admin) return $this->sendError('No tiene permisos ese usuario', [], 403);
         $user = User::where('uuid', $userCode)->first();
         if (!$user) return $this->sendError('No existe el usuario seleccionado', [], 404);
-        $this->reconcileManualReactivations($user);
-        $reactivation = ManualReactivation::where('user_id', $user->id)->latest('id')->first();
-        $canDeactivate = $reactivation?->state === ManualReactivation::ACTIVE;
+        $reactivation = ManualReactivation::where('user_id', $user->id)
+            ->where('state', ManualReactivation::ACTIVE)
+            ->latest('id')->first();
+        $canDeactivate = $reactivation !== null;
         $eligibility = $this->reactivationEligibility($user);
         $canReactivate = !$user->active && !$canDeactivate && $eligibility['eligible'];
         return $this->sendResponse([
