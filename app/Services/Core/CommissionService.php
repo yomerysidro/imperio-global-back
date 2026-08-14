@@ -226,17 +226,14 @@ class CommissionService
                 ->where('state', true)->max('level');
             $countLevel          = 0;
 
-            // 🔥 RECORRER EL ÁRBOL Y ASIGNAR RESIDUALES (MÁXIMO 7 NIVELES)
+            // Recorrer la linea ascendente hasta el ultimo nivel residual configurado.
             foreach ($_paymentOrderPoints as $key => $_paymentOrderPoint) {
                 $_paymentOrderPoint = (object) $_paymentOrderPoint;
                 $countLevel++;
                 
-                // Límite máximo: 7 niveles (según tu tabla)
                 if ($countLevel > $maxResidualLevel) break;
 
                 $point = 0;
-                // Porcentajes exactos según tu tabla:
-                // Nivel 1: 14%, Nivel 2: 10%, Nivel 3: 18%, Nivel 4: 8%, Nivel 5: 6%, Nivel 6: 0.5%, Nivel 7: 0.5%
                 $beneficiaryCode = $_paymentOrderPoint->sponsor_code;
                 $beneficiary = User::where('uuid', $beneficiaryCode)->first();
                 $beneficiaryRangeOrder = (int) ($beneficiary?->range?->range?->order ?? 0);
@@ -244,7 +241,12 @@ class CommissionService
                     ->where('level', $countLevel)->where('state', true)->first();
                 $requiredRangeOrder = (int) ($rule?->minimumRange?->order ?? 0);
                 $isActive = $beneficiary?->active ?? false;
-                $percent = ($rule && $beneficiary && $isActive && $beneficiaryRangeOrder >= $requiredRangeOrder)
+                // Los tres primeros niveles no requieren rango. Esta regla vive
+                // tambien en codigo para que se aplique desde el despliegue,
+                // incluso antes de sincronizar la configuracion de la BD.
+                $meetsRangeRequirement = $countLevel <= 3
+                    || $beneficiaryRangeOrder >= $requiredRangeOrder;
+                $percent = ($rule && $beneficiary && $isActive && $meetsRangeRequirement)
                     ? (float) $rule->percentage : 0;
                 $point = $points * $percent / 100;
                 $exists = PaymentOrderPoint::where('payment_order_id', $paymentOrderId)
@@ -276,7 +278,7 @@ class CommissionService
                         'user_code' => $beneficiaryCode,
                         'reason' => !$rule ? 'rule_not_configured'
                             : (!$isActive ? 'beneficiary_inactive'
-                            : ($beneficiaryRangeOrder < $requiredRangeOrder ? 'minimum_range_not_met' : 'zero_percentage')),
+                            : (!$meetsRangeRequirement ? 'minimum_range_not_met' : 'zero_percentage')),
                     ];
                 }
             }
