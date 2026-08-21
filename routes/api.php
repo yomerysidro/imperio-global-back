@@ -50,6 +50,8 @@ Route::prefix('v1')->group(function () {
             Route::get('list-tree', [UserController::class, 'treeList']);
             Route::post('modify', [UserController::class, 'modifyUser']);
             Route::post('create-user', [UserController::class, 'createUser']);
+            Route::delete('{userCode}/network', [UserController::class, 'deleteNetwork']);
+            Route::delete('{userCode}', [UserController::class, 'deleteSingle']);
             Route::get('{id}', [UserController::class, 'show'])->whereNumber('id');
 
             // Rutas derivadas a FinanceController (Se mantiene URL, cambia Controlador)
