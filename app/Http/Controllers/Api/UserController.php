@@ -38,6 +38,7 @@ use App\Models\VerificationCodeUser;
 use App\Models\SponsorRelation;
 use App\Models\ManualReactivation;
 use App\Services\Core\RangeQualificationService;
+use App\Services\Core\UserNetworkDeletionService;
 
 class UserController extends BaseController
 {
@@ -776,6 +777,46 @@ class UserController extends BaseController
         } catch (Exception $e) {
             DB::rollBack();
             return $this->sendError("Error: " . $e->getMessage());
+        }
+    }
+
+    public function deleteNetwork(string $userCode)
+    {
+        return $this->deleteUser($userCode, true);
+    }
+
+    public function deleteSingle(string $userCode)
+    {
+        return $this->deleteUser($userCode, false);
+    }
+
+    private function deleteUser(string $userCode, bool $withNetwork)
+    {
+        $admin = Auth::user();
+        if (!$admin || !$admin->is_admin) {
+            return $this->sendError('No tiene permisos para eliminar usuarios.', [], 403);
+        }
+
+        $user = User::where('uuid', $userCode)->first();
+        if (!$user) {
+            return $this->sendError('Usuario no encontrado.', [], 404);
+        }
+
+        if ((int) $user->id === (int) $admin->id) {
+            return $this->sendError('No puede eliminar su propio usuario.', [], 422);
+        }
+
+        try {
+            $result = app(UserNetworkDeletionService::class)->delete($user, $withNetwork);
+            $message = $withNetwork
+                ? 'Usuario y toda su red fueron eliminados correctamente.'
+                : 'Usuario eliminado y sus hijos fueron reasignados correctamente.';
+            return $this->sendResponse($result, $message);
+        } catch (\RuntimeException $e) {
+            return $this->sendError($e->getMessage(), [], 422);
+        } catch (\Throwable $e) {
+            report($e);
+            return $this->sendError('No se pudo eliminar el usuario y su red.', [], 500);
         }
     }
 
