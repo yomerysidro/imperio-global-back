@@ -151,7 +151,7 @@ class FinanceController extends BaseController
         foreach ($userList as $user) {
             $payment = PaymentLog::with(['paymentOrder.pack'])
                 ->where("user_id", $user->id)
-                ->whereIn('state', [PaymentLog::PAGADO, PaymentLog::TERMINADO])
+                ->whereIn('state', [PaymentLog::PAGADO, PaymentLog::TERMINADO, PaymentLog::RESET])
                 ->orderBy('created_at', 'desc')
                 ->first();
             $productPayment = PaymentProductOrder::with('pack')
