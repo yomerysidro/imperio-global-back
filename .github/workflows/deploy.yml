@@ -21,6 +21,9 @@ jobs:
         port: 22
         key_checking: false
         script: |
+          # Detener el despliegue si falla Git, Composer o una migracion.
+          set -e
+
           # 1. Moverse al directorio web contenedor
           cd /var/www
           
@@ -44,13 +47,14 @@ jobs:
           
           # 6. Instalar dependencias de Laravel sin librerías de desarrollo
           composer install --no-dev --optimize-autoloader --no-interaction
+
+          # 7. Ejecutar solo migraciones pendientes; Laravel no repite las aplicadas.
+          php artisan migrate --force --no-interaction
           
-          # 7. Sincronizar permisos de propiedad para Nginx sobre la nueva ruta
+          # 8. Sincronizar permisos de propiedad para Nginx sobre la nueva ruta
           sudo chown -R www-data:www-data /var/www/imperio-global-back
           sudo chmod -R 775 /var/www/imperio-global-back/storage /var/www/imperio-global-back/bootstrap/cache
           
-          # 8. Purgar la caché interna de Laravel y reiniciar el servidor web
-          php artisan cache:clear
-          php artisan config:clear
-          php artisan route:clear
-          sudo systemctl restart nginx
+          # 9. Reconstruir las caches de Laravel sin reiniciar Nginx.
+          php artisan optimize:clear
+          php artisan optimize
