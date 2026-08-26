@@ -59,6 +59,7 @@ Route::prefix('v1')->group(function () {
             Route::get('commission-summary', [FinanceController::class, 'commissionSummary']);
             Route::get('payments/find-all', [FinanceController::class, 'paymentsAll']);
             Route::post('change-sponsor', [FinanceController::class, 'changeSponsor']);
+            Route::post('change-sponsor-with-network', [FinanceController::class, 'changeSponsorWithNetwork']);
             Route::post('reset', [FinanceController::class, 'resetPoint']);
             Route::post('reset-all', [FinanceController::class, 'resetAll']);
             Route::post('reset-all-points', [FinanceController::class, 'resetAllPoint']);

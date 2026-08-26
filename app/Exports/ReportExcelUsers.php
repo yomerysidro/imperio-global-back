@@ -31,7 +31,9 @@ class ReportExcelUsers implements FromArray, WithHeadings, WithEvents
             'Bono personales de afiliados',
             'Bonos de Patrocinio',
             'Bonos de Patrocinio Cobrados',
-            'Bonos Residual',
+            'Residual Producto (R)',
+            'Residual Servicio (RS)',
+            'Bonos Residual Total',
             'Bonos Totales',
             'Puntos por tu plan Actual',
             'Puntos por compras personales',
@@ -46,7 +48,7 @@ class ReportExcelUsers implements FromArray, WithHeadings, WithEvents
         return [
             AfterSheet::class => function(AfterSheet $event) {
                 // Aplica estilos a la cabecera (fila 1)
-                $event->sheet->getStyle('A1:N1')->applyFromArray([
+                $event->sheet->getStyle('A1:P1')->applyFromArray([
                     'font' => ['bold' => true, 'color' => ['rgb' => 'FFFFFF']],
                     'fill' => [
                         'fillType' => \PhpOffice\PhpSpreadsheet\Style\Fill::FILL_SOLID,
@@ -56,15 +58,15 @@ class ReportExcelUsers implements FromArray, WithHeadings, WithEvents
                 ]);
 
                 // Ancho automático de columnas
-                foreach (['E', 'F', 'G', 'H', 'I', 'L', 'M'] as $col) {
+                foreach (['E', 'F', 'G', 'H', 'I', 'J', 'K', 'N', 'O'] as $col) {
                     $event->sheet->getStyle("{$col}2:{$col}".$event->sheet->getHighestRow())
                         ->getNumberFormat()->setFormatCode('#,##0.00');
                 }
 
                 $lastRow = $event->sheet->getHighestRow();
-                $event->sheet->getStyle("A{$lastRow}:N{$lastRow}")->getFont()->setBold(true);
+                $event->sheet->getStyle("A{$lastRow}:P{$lastRow}")->getFont()->setBold(true);
 
-                foreach (range('A', 'N') as $col) {
+                foreach (range('A', 'P') as $col) {
                     $event->sheet->getDelegate()->getColumnDimension($col)->setAutoSize(true);
                 }
             }

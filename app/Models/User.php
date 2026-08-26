@@ -105,10 +105,21 @@ class User extends Authenticatable
             }
         };
         
-        // 1. Membresía de Servicios Digitales (Estado 2 o 6)
+        $manualReactivations = ManualReactivation::where('user_id', $this->id)->get([
+            'payment_product_order_id', 'payment_log_ids',
+        ]);
+        $reactivationProductOrderIds = $manualReactivations
+            ->pluck('payment_product_order_id')->filter()->unique()->values();
+        $reactivationPaymentLogIds = $manualReactivations
+            ->pluck('payment_log_ids')->filter()->flatten()->filter()->unique()->values();
+
+        // El pack adquirido es permanente. RESET cierra puntos o vigencia, no
+        // elimina la compra ni el derecho a conservar el pack y su descuento.
         $services = PaymentLog::with('paymentOrder.pack')
             ->where('user_id', $this->id)
-            ->whereIn('state', [PaymentLog::PAGADO, PaymentLog::TERMINADO])
+            ->whereIn('state', [PaymentLog::PAGADO, PaymentLog::TERMINADO, PaymentLog::RESET])
+            ->when($reactivationPaymentLogIds->isNotEmpty(), fn ($query) =>
+                $query->whereNotIn('id', $reactivationPaymentLogIds))
             ->orderBy('created_at')
             ->get();
         foreach ($services as $log) {
@@ -121,6 +132,8 @@ class User extends Authenticatable
         // 2. Packs de Productos (Estado 2, 3 o 6)
         $products = PaymentProductOrder::with('pack')
             ->where('user_id', $this->id)
+            ->when($reactivationProductOrderIds->isNotEmpty(), fn ($query) =>
+                $query->whereNotIn('id', $reactivationProductOrderIds))
             ->whereIn('state', [
                 PaymentProductOrder::PAGADO,
                 PaymentProductOrder::ENVIADO,

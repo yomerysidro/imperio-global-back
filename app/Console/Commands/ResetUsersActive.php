@@ -131,6 +131,8 @@ class ResetUsersActive extends Command
                             "points" => (object) array(
                                 "patrocinio"    => $commissions['patrocinio'],
                                 "residual"      => $commissions['residual'],
+                                "residualProducto" => $commissions['residualProducto'],
+                                "residualServicio" => $commissions['residualServicio'],
                                 "compra"        => $calculator->compra,
                                 "pointGroup"    => $calculator->pointGroup,
                                 "personal"      => $calculator->personal,
@@ -147,15 +149,20 @@ class ResetUsersActive extends Command
                     $excelBody = array();
                     $globalPatrocinio = 0.0;
                     $globalResidual = 0.0;
+                    $globalResidualProducto = 0.0;
+                    $globalResidualServicio = 0.0;
                     $globalInfinito = 0.0;
 
                     foreach ($jsonBody as $key => $json) {
-                        $payable = (float) ($json->points?->pointAfiliado ?? 0)
-                            + (float) ($json->points?->patrocinio ?? 0)
+                        // Los puntos personales se reportan como puntos y no
+                        // forman parte de las ganancias monetarias.
+                        $payable = (float) ($json->points?->patrocinio ?? 0)
                             + (float) ($json->points?->residual ?? 0)
                             + (float) ($json->points?->infinito ?? 0);
                         $globalPatrocinio += (float) ($json->points?->patrocinio ?? 0);
                         $globalResidual += (float) ($json->points?->residual ?? 0);
+                        $globalResidualProducto += (float) ($json->points?->residualProducto ?? 0);
+                        $globalResidualServicio += (float) ($json->points?->residualServicio ?? 0);
                         $globalInfinito += (float) ($json->points?->infinito ?? 0);
                         array_push(
                             $excelBody,
@@ -164,9 +171,11 @@ class ResetUsersActive extends Command
                                 $json->uuid,
                                 $json->status,
                                 $json->pack,
-                                $json->points?->pointAfiliado ?? 0,
+                                0,
                                 $json->points?->patrocinio ?? 0,
                                 0,
+                                $json->points?->residualProducto ?? 0,
+                                $json->points?->residualServicio ?? 0,
                                 $json->points?->residual ?? 0,
                                 $payable,
                                 $json->planPoints,
@@ -180,7 +189,8 @@ class ResetUsersActive extends Command
 
                     $globalPayable = $globalPatrocinio + $globalResidual + $globalInfinito;
                     $excelBody[] = ['TOTAL GENERAL EMPRESA', '', '', '', 0,
-                        round($globalPatrocinio, 2), 0, round($globalResidual, 2),
+                        round($globalPatrocinio, 2), 0, round($globalResidualProducto, 2),
+                        round($globalResidualServicio, 2), round($globalResidual, 2),
                         round($globalPayable, 2), '', '', round($globalInfinito, 2),
                         round($globalPayable, 2), ''];
 
@@ -235,6 +245,8 @@ class ResetUsersActive extends Command
                         "points" => (object) array(
                             "patrocinio"    => $commissions['patrocinio'],
                             "residual"      => $commissions['residual'],
+                            "residualProducto" => $commissions['residualProducto'],
+                            "residualServicio" => $commissions['residualServicio'],
                             "compra"        => $calculator->compra,
                             "pointGroup"    => $calculator->pointGroup,
                             "personal"      => $calculator->personal,
