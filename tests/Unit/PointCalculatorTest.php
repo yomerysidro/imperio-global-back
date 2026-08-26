@@ -27,6 +27,8 @@ class PointCalculatorTest extends TestCase
         $this->assertSame(300, $result->pointGroup);
         $this->assertSame(75, $result->patrocinio);
         $this->assertSame(20, $result->residual);
+        $this->assertSame(14, $result->residualProducto);
+        $this->assertSame(6, $result->residualServicio);
         $this->assertSame(400, $result->total_general);
         $this->assertSame(95, $result->total_comisiones);
         $this->assertSame(95, $result->bono_total);

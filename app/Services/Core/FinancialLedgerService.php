@@ -38,7 +38,12 @@ class FinancialLedgerService
             $users, $activation, $from, $to, $isCurrentPeriod
         ) {
             $user = $users->get(strtoupper((string) $movement->user_code));
-            return $user && $activation->isActiveForPeriod($user, $from, $to, !$isCurrentPeriod);
+            if (!$user) return false;
+            $category = $movement->type === PaymentOrderPoint::RESIDUAL_SERVICIO ? 'service'
+                : ($movement->type === PaymentOrderPoint::RESIDUAL ? 'product' : null);
+            return $category
+                ? $activation->isActiveForCategoryPeriod($user, $category, $from, $to, !$isCurrentPeriod)
+                : $activation->isActiveForPeriod($user, $from, $to, !$isCurrentPeriod);
         })->values();
     }
 
@@ -62,7 +67,9 @@ class FinancialLedgerService
         $active = $rows;
         $sum = fn (Collection $items, array $types) => round((float) $items->whereIn('type', $types)->sum('point'), 2);
         $patrocinio = $sum($active, ['P', 'PS', 'S']);
-        $residual = $sum($active, ['R', 'RS']);
+        $residualProducto = $sum($active, ['R']);
+        $residualServicio = $sum($active, ['RS']);
+        $residual = round($residualProducto + $residualServicio, 2);
         $infinito = $sum($active, ['I']);
 
         $bonoTotal = round($patrocinio + $residual + $infinito, 2);
@@ -71,6 +78,8 @@ class FinancialLedgerService
             'patrocinio' => $patrocinio,
             'bono' => $patrocinio,
             'residual' => $residual,
+            'residualProducto' => $residualProducto,
+            'residualServicio' => $residualServicio,
             'infinito' => $infinito,
             'bono_total' => $bonoTotal,
             'bonos_totales' => $bonoTotal,

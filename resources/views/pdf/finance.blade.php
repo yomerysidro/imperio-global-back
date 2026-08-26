@@ -34,7 +34,9 @@
         <p style="color: #000000;">Bonos de patrocinio válidos: <b>S/ {{ number_format($patrocinioUserActive, 2) }}</b></p>
         <div style="margin-bottom: 20px;"></div>
 
-        <p style="color: #000000;">Bonos residuales válidos: <b>S/ {{ number_format($residualUserActive, 2) }}</b></p>
+        <p style="color: #000000;">Residual de producto (R): <b>S/ {{ number_format($residualProductActive, 2) }}</b></p>
+        <p style="color: #000000;">Residual de servicio (RS): <b>S/ {{ number_format($residualServiceActive, 2) }}</b></p>
+        <p style="color: #000000;">Bonos residuales totales: <b>S/ {{ number_format($residualUserActive, 2) }}</b></p>
         <div style="margin-bottom: 20px;"></div>
 
         <p>Bono infinito: <b>S/ {{ number_format($infinityUser, 2) }}</b></p>

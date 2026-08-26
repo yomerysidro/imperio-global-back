@@ -59,6 +59,42 @@ class NetworkTreeService
         return $legacy?->sponsor_code;
     }
 
+    /**
+     * Determine whether a user belongs anywhere below the given sponsor.
+     * Walking upwards avoids loading the sponsor's complete descendant tree.
+     */
+    public function belongsToNetwork(string $sponsorCode, string $targetCode): bool
+    {
+        if (strcasecmp($sponsorCode, $targetCode) === 0) {
+            return true;
+        }
+
+        $visited = [];
+        $currentCode = $targetCode;
+
+        while ($currentCode !== '') {
+            $normalizedCode = strtoupper($currentCode);
+            if (isset($visited[$normalizedCode])) {
+                return false;
+            }
+
+            $visited[$normalizedCode] = true;
+            $parentCode = $this->sponsorCode($currentCode);
+
+            if (!$parentCode || strcasecmp($parentCode, $currentCode) === 0) {
+                return false;
+            }
+
+            if (strcasecmp($parentCode, $sponsorCode) === 0) {
+                return true;
+            }
+
+            $currentCode = $parentCode;
+        }
+
+        return false;
+    }
+
     public function getAllNetworkUsers($userCode, &$visited = [])
     {
         $normalized = strtoupper($userCode);

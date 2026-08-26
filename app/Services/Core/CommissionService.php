@@ -192,13 +192,25 @@ class CommissionService
         Cache::forget('existing_user_uuids');
     }
 
-    public function confirmPointAfiliado($userCurrent, $points, $manualReactivationId = null, $paymentOrderId = null): array
+    public function confirmPointAfiliado(
+        $userCurrent,
+        $points,
+        $manualReactivationId = null,
+        $paymentOrderId = null,
+        string $category = 'product'
+    ): array
 {
     $summary = ['generated_count' => 0, 'generated_amount' => 0.0, 'blocked' => []];
+    $category = strtolower(trim($category));
+    if (!in_array($category, ['product', 'service'], true)) {
+        $summary['blocked'][] = ['reason' => 'invalid_reactivation_category'];
+        return $summary;
+    }
     if ($manualReactivationId) {
         $reactivation = ManualReactivation::find($manualReactivationId);
         if (!$reactivation || (int) $reactivation->user_id !== (int) $userCurrent->id
-            || $reactivation->state !== ManualReactivation::ACTIVE) {
+            || $reactivation->state !== ManualReactivation::ACTIVE
+            || $reactivation->category !== $category) {
             $summary['blocked'][] = ['reason' => 'source_reactivation_inactive'];
             return $summary;
         }
@@ -206,7 +218,7 @@ class CommissionService
 
     ActivationService::clearCache();
     $userCurrent->refresh();
-    if (!$userCurrent->active) {
+    if (!app(ActivationService::class)->isActiveForCategory($userCurrent, $category)) {
         $summary['blocked'][] = ['reason' => 'source_user_inactive'];
         return $summary;
     }
@@ -224,7 +236,7 @@ class CommissionService
             // 🔥 OBTENER EL ÁRBOL COMPLETO DEL USUARIO (línea ascendente)
             $_paymentOrderPoints = $this->networkTreeService->loopTree([], $userCurrent->uuid);
             $maxResidualLevel = (int) CommissionRule::where('bonus_type', CommissionRule::RESIDUAL)
-                ->where('state', true)->max('level');
+                ->where('category', $category)->where('state', true)->max('level');
             $countLevel          = 0;
 
             // Recorrer la linea ascendente hasta el ultimo nivel residual configurado.
@@ -239,20 +251,25 @@ class CommissionService
                 $beneficiary = User::where('uuid', $beneficiaryCode)->first();
                 $beneficiaryRangeOrder = (int) ($beneficiary?->range?->range?->order ?? 0);
                 $rule = CommissionRule::with('minimumRange')->where('bonus_type', CommissionRule::RESIDUAL)
+                    ->where('category', $category)
                     ->where('level', $countLevel)->where('state', true)->first();
                 $requiredRangeOrder = (int) ($rule?->minimumRange?->order ?? 0);
-                $isActive = $beneficiary?->active ?? false;
+                $isActive = $beneficiary
+                    ? app(ActivationService::class)->isActiveForCategory($beneficiary, $category)
+                    : false;
                 // Los tres primeros niveles no requieren rango. Esta regla vive
                 // tambien en codigo para que se aplique desde el despliegue,
                 // incluso antes de sincronizar la configuracion de la BD.
-                $meetsRangeRequirement = $countLevel <= 3
+                $meetsRangeRequirement = $category === 'service' || $countLevel <= 3
                     || $beneficiaryRangeOrder >= $requiredRangeOrder;
                 $percent = ($rule && $beneficiary && $isActive && $meetsRangeRequirement)
                     ? (float) $rule->percentage : 0;
                 $point = $points * $percent / 100;
                 $exists = PaymentOrderPoint::where('payment_order_id', $paymentOrderId)
                     ->where('user_code', $beneficiaryCode)
-                    ->where('type', PaymentOrderPoint::RESIDUAL)
+                    ->where('type', $category === 'service'
+                        ? PaymentOrderPoint::RESIDUAL_SERVICIO
+                        : PaymentOrderPoint::RESIDUAL)
                     ->where('level', $countLevel)
                     ->exists();
 
@@ -266,7 +283,9 @@ class CommissionService
                         'source_user_code' => $userCurrent->uuid,
                         'point'            => $point,
                         'payment'          => 0, // No es pago directo
-                        'type'             => PaymentOrderPoint::RESIDUAL, // Tipo R (Residual)
+                        'type'             => $category === 'service'
+                            ? PaymentOrderPoint::RESIDUAL_SERVICIO
+                            : PaymentOrderPoint::RESIDUAL,
                         'level'            => $countLevel,
                         'user_id'          => $beneficiary->id,
                         'state'            => 1 // Activo

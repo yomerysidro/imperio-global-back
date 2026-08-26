@@ -78,7 +78,7 @@ class UserController extends BaseController
                 ->where("user_id", $user->id)->whereIn('state', [PaymentProductOrder::PAGADO, PaymentProductOrder::ENVIADO])->orderBy('created_at', 'desc')->first();
 
             $ultimoPago = collect([$servicePayment, $productPayment])->filter()->sortByDesc('created_at')->first();
-            $displayPayment = $ultimoPago ?? $this->latestTerminatedPackagePayment($user->id);
+            $displayPayment = $this->latestOwnedPackagePayment($user->id);
 
             $isActive   = false;
             $mesFiltro  = $currentMonth;
@@ -98,7 +98,9 @@ class UserController extends BaseController
             }
 
             if (!$isActive && $ultimoPago) $ultimoPago->state = 6;
-            $user->payment = $displayPayment;
+            $isActive = app(\App\Services\Core\ActivationService::class)->isActive($user);
+            $user->payment = $this->displayPaymentPayload($displayPayment, $isActive);
+            $user->active = $isActive;
 
             // =========================================================
             // 🔥 CÁLCULO DE PUNTOS (EXACTO AL DE auth())
@@ -153,6 +155,79 @@ class UserController extends BaseController
 
             $user->totalPoints = $totalPoints;
 
+            // La propiedad del pack es historica y no depende de que la
+            // activacion mensual siga vigente. Se excluyen solamente las
+            // ordenes creadas por reactivaciones administrativas.
+            $manualReactivations = ManualReactivation::where('user_id', $user->id)->get([
+                'payment_product_order_id', 'payment_log_ids',
+            ]);
+            $reactivationProductOrderIds = $manualReactivations
+                ->pluck('payment_product_order_id')->filter()->unique()->values();
+            $reactivationPaymentLogIds = $manualReactivations
+                ->pluck('payment_log_ids')->filter()->flatten()->filter()->unique()->values();
+
+            $packagePurchases = PaymentLog::with(['paymentOrder.pack'])
+                ->where('user_id', $user->id)
+                ->whereIn('state', [PaymentLog::PAGADO, PaymentLog::TERMINADO, PaymentLog::RESET])
+                ->when($reactivationPaymentLogIds->isNotEmpty(), fn ($query) =>
+                    $query->whereNotIn('id', $reactivationPaymentLogIds))
+                ->latest('created_at')->get();
+            $servicePurchases = $packagePurchases->filter(fn (PaymentLog $payment) =>
+                strcasecmp(trim((string) $payment->paymentOrder?->pack?->category), 'Servicio') === 0
+            )->values();
+            $productPackPurchases = $packagePurchases->filter(fn (PaymentLog $payment) =>
+                strcasecmp(trim((string) $payment->paymentOrder?->pack?->category), 'Producto') === 0
+            )->values();
+
+            $productPurchases = PaymentProductOrder::with('pack')
+                ->where('user_id', $user->id)
+                ->whereIn('state', [
+                    PaymentProductOrder::PAGADO,
+                    PaymentProductOrder::ENVIADO,
+                    PaymentProductOrder::TERMINADO,
+                ])
+                ->when($reactivationProductOrderIds->isNotEmpty(), fn ($query) =>
+                    $query->whereNotIn('id', $reactivationProductOrderIds))
+                ->whereHas('pack', fn ($query) =>
+                    $query->whereRaw('LOWER(TRIM(category)) = ?', ['producto']))
+                ->latest('created_at')->get();
+
+            // Campos compatibles con el modal actual.
+            $user->payment_services = $servicePurchases->map(fn (PaymentLog $payment) => [
+                'id' => $payment->id,
+                'pack_id' => $payment->paymentOrder?->pack_id,
+                'state' => $payment->state,
+                'pack' => $payment->paymentOrder?->pack,
+                'created_at' => $payment->created_at,
+            ])->values();
+            $user->payment_product_orders = $productPurchases;
+
+            $latestProductPack = collect([
+                $productPackPurchases->first() ? [
+                    'pack' => $productPackPurchases->first()->paymentOrder?->pack,
+                    'created_at' => $productPackPurchases->first()->created_at,
+                ] : null,
+                $productPurchases->first() ? [
+                    'pack' => $productPurchases->first()->pack,
+                    'created_at' => $productPurchases->first()->created_at,
+                ] : null,
+            ])->filter(fn ($purchase) => $purchase && $purchase['pack'])
+                ->sortByDesc('created_at')->first();
+
+            $activation = app(\App\Services\Core\ActivationService::class);
+            $user->packs_by_category = [
+                'product' => [
+                    'owned' => $latestProductPack !== null,
+                    'active' => $activation->isActiveForCategory($user, 'product'),
+                    'pack' => $latestProductPack['pack'] ?? null,
+                ],
+                'service' => [
+                    'owned' => $servicePurchases->isNotEmpty(),
+                    'active' => $activation->isActiveForCategory($user, 'service'),
+                    'pack' => $servicePurchases->first()?->paymentOrder?->pack,
+                ],
+            ];
+
             // 🔥 AGREGAR USER_DETAIL (LO QUE EL FRONTEND NECESITA)
             $user->user_detail = [
                 'puntos_personales'   => $puntosPersonales,
@@ -197,7 +272,7 @@ class UserController extends BaseController
             ->where("user_id", $user_id)->whereIn('state', [PaymentProductOrder::PAGADO, PaymentProductOrder::ENVIADO])->orderBy('created_at', 'desc')->first();
 
         $ultimoPago = collect([$servicePayment, $productPayment])->filter()->sortByDesc('created_at')->first();
-        $displayPayment = $ultimoPago ?? $this->latestTerminatedPackagePayment($user_id);
+        $displayPayment = $this->latestOwnedPackagePayment($user_id);
 
         $isActive   = false;
         $mesFiltro  = $currentMonth;
@@ -248,7 +323,8 @@ class UserController extends BaseController
             PaymentLog::where('id', $ultimoPago->id)->update(['state' => 6]);
         }
 
-        $userModel->payment      = $displayPayment;
+        $isActive = app(\App\Services\Core\ActivationService::class)->isActive($userModel);
+        $userModel->payment      = $this->displayPaymentPayload($displayPayment, $isActive);
         $userModel->package_name = $userModel->package_name;
         $userModel->active       = $isActive;
 
@@ -527,8 +603,11 @@ class UserController extends BaseController
         if (!$userModel->is_admin) {
             if ($request->has('code')) {
                 $targetCode = $request->query('code');
-                $isBelongingToNetwork = PaymentOrderPoint::where('user_code', $targetCode)->where('sponsor_code', $userModel->uuid)->exists();
-                if (!$isBelongingToNetwork && strtoupper($targetCode) !== strtoupper($userModel->uuid)) {
+                $isBelongingToNetwork = $this->networkTreeService->belongsToNetwork(
+                    $userModel->uuid,
+                    $targetCode
+                );
+                if (!$isBelongingToNetwork) {
                     return $this->sendError("No tiene permisos para ver la información de este usuario.");
                 }
             } else {
@@ -611,7 +690,7 @@ class UserController extends BaseController
                 ->where("user_id", $user->id)->whereIn('state', [PaymentProductOrder::PAGADO, PaymentProductOrder::ENVIADO])->orderBy('created_at', 'desc')->first();
 
             $ultimoPago = collect([$servicePayment, $productPayment])->filter()->sortByDesc('created_at')->first();
-            $displayPayment = $ultimoPago ?? $this->latestTerminatedPackagePayment($user->id);
+            $displayPayment = $this->latestOwnedPackagePayment($user->id);
 
             $isActive = false;
             $mesFiltro = $currentMonth;
@@ -635,8 +714,14 @@ class UserController extends BaseController
             }
 
             if (!$isActive && $ultimoPago) $ultimoPago->state = 6;
-            $userList[$key]->payment = $displayPayment;
+            $isActive = app(\App\Services\Core\ActivationService::class)->isActive($user);
+            $userList[$key]->payment = $this->displayPaymentPayload($displayPayment, $isActive);
+            $userList[$key]->active = $isActive;
             $userList[$key]->package_name = $user->package_name;
+            $activation = app(\App\Services\Core\ActivationService::class);
+            $userList[$key]->active_product = $activation->isActiveForCategory($user, 'product');
+            $userList[$key]->active_service = $activation->isActiveForCategory($user, 'service');
+            $userList[$key]->packs_by_category = $this->ownedPacksByCategory($user, $activation);
             // Esta marca solo corresponde a reactivaciones mensuales registradas.
             // Una compra normal de paquete o productos no habilita la desactivación.
             $userList[$key]->manual_reactivation_active = in_array(
@@ -666,6 +751,20 @@ class UserController extends BaseController
 
             // 🔥 ASIGNAR EL OBJETO COMPLETO AL USUARIO
             $userList[$key]->points = $userPoints;
+
+            // Keep the modal payload aligned with the `points` object used by the table.
+            $userList[$key]->user_detail = [
+                'paquete_actual'      => $user->package_name,
+                'activo'              => $isActive,
+                'puntos_personales'   => (float) $userPoints->personal,
+                'puntos_red'          => (float) $userPoints->pointGroup,
+                'total_puntos'        => (float) $userPoints->total_general,
+                'ganancia_patrocinio' => (float) $userPoints->patrocinio,
+                'ganancia_residual'   => (float) $userPoints->residual,
+                'bono_infinito'       => (float) $userPoints->infinito,
+                'total_comisiones'    => (float) $userPoints->total_comisiones,
+                'ganancia_total'      => (float) $userPoints->ganancia_total,
+            ];
 
             // Usar el mismo motor de calificacion que el perfil y el CRON.
             app(RangeQualificationService::class)->recalculateUser($user);
@@ -702,7 +801,8 @@ class UserController extends BaseController
     {
         $validator = Validator::make($request->all(), [
             'userCode'     => 'required',
-            'userFullName' => 'required'
+            'userFullName' => 'required',
+            'userEmail'    => 'sometimes|required|email',
         ]);
 
         if ($validator->fails()) return $this->sendError('Error de validacion.', $validator->errors(), 422);
@@ -715,7 +815,20 @@ class UserController extends BaseController
             $userUpdated = User::where("uuid", $request->userCode)->first();
             if (!$userUpdated) return $this->sendError("Usuario no encontrado");
 
-            $userUpdated->update(["name" => $request->userFullName]);
+            if ($request->filled('userEmail')) {
+                $emailExists = User::where('email', $request->userEmail)
+                    ->where('id', '!=', $userUpdated->id)
+                    ->exists();
+                if ($emailExists) {
+                    DB::rollBack();
+                    return $this->sendError('El correo ya pertenece a otro usuario.', [], 422);
+                }
+            }
+
+            $userUpdated->update([
+                'name' => $request->userFullName,
+                'email' => $request->filled('userEmail') ? $request->userEmail : $userUpdated->email,
+            ]);
 
             $currentSponsor = PaymentOrderPoint::where('user_code', $userUpdated->uuid)
                 ->where('type', PaymentOrderPoint::COMPRA)
@@ -1321,16 +1434,32 @@ class UserController extends BaseController
         }
     }
 
-    private function latestTerminatedPackagePayment(int $userId)
+    private function latestOwnedPackagePayment(int $userId)
     {
+        $manualReactivations = ManualReactivation::where('user_id', $userId)->get([
+            'payment_product_order_id', 'payment_log_ids',
+        ]);
+        $reactivationProductOrderIds = $manualReactivations
+            ->pluck('payment_product_order_id')->filter()->unique()->values();
+        $reactivationPaymentLogIds = $manualReactivations
+            ->pluck('payment_log_ids')->filter()->flatten()->filter()->unique()->values();
+
         $service = PaymentLog::with('paymentOrder.pack')
             ->where('user_id', $userId)
-            ->where('state', PaymentLog::TERMINADO)
+            ->whereIn('state', [PaymentLog::PAGADO, PaymentLog::TERMINADO, PaymentLog::RESET])
+            ->when($reactivationPaymentLogIds->isNotEmpty(), fn ($query) =>
+                $query->whereNotIn('id', $reactivationPaymentLogIds))
             ->latest('created_at')
             ->first();
         $product = PaymentProductOrder::with('pack')
             ->where('user_id', $userId)
-            ->where('state', PaymentProductOrder::TERMINADO)
+            ->whereIn('state', [
+                PaymentProductOrder::PAGADO,
+                PaymentProductOrder::ENVIADO,
+                PaymentProductOrder::TERMINADO,
+            ])
+            ->when($reactivationProductOrderIds->isNotEmpty(), fn ($query) =>
+                $query->whereNotIn('id', $reactivationProductOrderIds))
             ->latest('created_at')
             ->first();
 
@@ -1338,6 +1467,88 @@ class UserController extends BaseController
             ->filter()
             ->sortByDesc('created_at')
             ->first();
+    }
+
+    private function displayPaymentPayload($payment, bool $isActive)
+    {
+        if (!$payment) return null;
+
+        $displayState = $isActive ? PaymentLog::PAGADO : PaymentLog::TERMINADO;
+        $expiresAt = $isActive ? now()->endOfMonth()->toIso8601String() : null;
+        if (!$payment instanceof PaymentProductOrder) {
+            $payload = $payment->toArray();
+            $payload['state'] = $displayState;
+            $payload['expires_at'] = $expiresAt;
+            return $payload;
+        }
+
+        // Contrato uniforme para consumidores que historicamente leen
+        // payment.payment_order.pack, aunque la compra venga de productos.
+        return [
+            'id' => $payment->id,
+            'state' => $displayState,
+            'expires_at' => $expiresAt,
+            'created_at' => $payment->created_at,
+            'pack_id' => $payment->pack_id,
+            'pack' => $payment->pack,
+            'payment_order' => [
+                'id' => $payment->id,
+                'pack_id' => $payment->pack_id,
+                'pack' => $payment->pack,
+            ],
+        ];
+    }
+
+    private function ownedPacksByCategory(User $user, $activation): array
+    {
+        $manualReactivations = ManualReactivation::where('user_id', $user->id)->get([
+            'payment_product_order_id', 'payment_log_ids',
+        ]);
+        $reactivationProductOrderIds = $manualReactivations
+            ->pluck('payment_product_order_id')->filter()->unique()->values();
+        $reactivationPaymentLogIds = $manualReactivations
+            ->pluck('payment_log_ids')->filter()->flatten()->filter()->unique()->values();
+
+        $logs = PaymentLog::with('paymentOrder.pack')
+            ->where('user_id', $user->id)
+            ->whereIn('state', [PaymentLog::PAGADO, PaymentLog::TERMINADO, PaymentLog::RESET])
+            ->when($reactivationPaymentLogIds->isNotEmpty(), fn ($query) =>
+                $query->whereNotIn('id', $reactivationPaymentLogIds))
+            ->latest('created_at')->get();
+        $orders = PaymentProductOrder::with('pack')
+            ->where('user_id', $user->id)
+            ->whereIn('state', [
+                PaymentProductOrder::PAGADO,
+                PaymentProductOrder::ENVIADO,
+                PaymentProductOrder::TERMINADO,
+            ])
+            ->when($reactivationProductOrderIds->isNotEmpty(), fn ($query) =>
+                $query->whereNotIn('id', $reactivationProductOrderIds))
+            ->latest('created_at')->get();
+
+        return collect([
+            'product' => 'Producto',
+            'service' => 'Servicio',
+        ])->mapWithKeys(function (string $storedCategory, string $category) use ($logs, $orders, $activation, $user) {
+            $candidates = $logs->filter(fn (PaymentLog $log) =>
+                strcasecmp(trim((string) $log->paymentOrder?->pack?->category), $storedCategory) === 0
+            )->map(fn (PaymentLog $log) => [
+                'pack' => $log->paymentOrder?->pack,
+                'created_at' => $log->created_at,
+            ])->merge($orders->filter(fn (PaymentProductOrder $order) =>
+                strcasecmp(trim((string) $order->pack?->category), $storedCategory) === 0
+            )->map(fn (PaymentProductOrder $order) => [
+                'pack' => $order->pack,
+                'created_at' => $order->created_at,
+            ]))->filter(fn ($item) => $item['pack'])->sortByDesc('created_at');
+
+            $latest = $candidates->first();
+            return [$category => [
+                'owned' => $latest !== null,
+                'active' => $activation->isActiveForCategory($user, $category),
+                'pack' => $latest['pack'] ?? null,
+            ]];
+        })->all();
     }
 
     private function sponsorshipTotal($points): float

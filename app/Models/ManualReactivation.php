@@ -11,7 +11,8 @@ class ManualReactivation extends Model
     public const EXPIRED = 'expired';
 
     protected $fillable = [
-        'user_id', 'activated_by', 'payment_product_order_id', 'payment_order_point_ids',
+        'user_id', 'activated_by', 'category', 'period', 'minimum_points',
+        'payment_product_order_id', 'payment_order_point_ids',
         'payment_product_order_point_ids', 'payment_log_ids', 'amount', 'points', 'state',
         'payment_order_ids',
         'deactivated_at', 'deactivated_by',
@@ -24,6 +25,8 @@ class ManualReactivation extends Model
         'payment_order_ids' => 'array',
         'amount' => 'float',
         'points' => 'float',
+        'minimum_points' => 'float',
+        'period' => 'date',
         'deactivated_at' => 'datetime',
     ];
 

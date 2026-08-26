@@ -24,6 +24,7 @@ class Product extends Model
         'file',
         'user_id',
         'state',
+        'reactivation_category',
     ];
 
     protected $hidden = [

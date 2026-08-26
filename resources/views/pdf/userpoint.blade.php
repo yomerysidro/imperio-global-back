@@ -85,6 +85,8 @@
                 <tr>
                     <td>
                         <p>Bonos Patrocinio = <b>{{ $patrocinio }}</b></p>
+                        <p>Residual Producto (R) = <b>{{ $residualProducto }}</b></p>
+                        <p>Residual Servicio (RS) = <b>{{ $residualServicio }}</b></p>
                         <p>Bonos Residual = <b>{{ $residual + $pointAfiliado + $personalGlobal }}</b></p>
                         <p>Bonos Totales = <b>{{ $patrocinio + $residual + $pointAfiliado + $personalGlobal }}</b></p>
                         <p>Bonos Grupales = <b>{{ $pointGroup }}</b></p>
