@@ -23,6 +23,7 @@ Route::prefix('v1')->group(function () {
     Route::post('login', [LoginController::class, 'login']);
     Route::post('reset-password', [LoginController::class, 'resetPassword']);
     Route::post('auth/register', [LoginController::class, 'register']);
+    Route::get('auth/sponsor-verify', [LoginController::class, 'verifySponsor']);
     Route::post('auth/recover-password', [LoginController::class, 'recover']);
     Route::post('auth/validate-code/{uuid}', [LoginController::class, 'validate']);
     Route::get('auth/export', [UserController::class, 'export']);
