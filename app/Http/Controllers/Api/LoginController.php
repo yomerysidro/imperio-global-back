@@ -15,9 +15,41 @@ use App\Services\Core\CodeGenerator;
 use App\Mail\CreateUserMail;
 use App\Mail\PasswordUserMail;
 use Illuminate\Support\Facades\Mail;
+use Illuminate\Support\Facades\DB;
+use App\Models\SponsorRelation;
+use App\Services\Core\NetworkTreeService;
 
 class LoginController extends BaseController
 {
+    public function verifySponsor(Request $request)
+    {
+        $validator = Validator::make($request->all(), [
+            'code' => 'required|string',
+        ]);
+
+        if ($validator->fails()) {
+            return $this->sendError('Error de validacion.', $validator->errors(), 422);
+        }
+
+        $sponsor = User::whereRaw('UPPER(uuid) = ?', [
+            strtoupper(trim((string) $request->query('code'))),
+        ])->first();
+
+        $network = new NetworkTreeService();
+        if (!$sponsor || !$network->belongsToNetwork('DOSB', $sponsor->uuid)) {
+            return $this->sendError(
+                'El codigo de patrocinador no es valido.',
+                ['code' => ['El patrocinador no existe o no pertenece a la organizacion.']],
+                422
+            );
+        }
+
+        return $this->sendResponse([
+            'sponsor_code' => $sponsor->uuid,
+            'sponsor_name' => $sponsor->name,
+        ], 'Patrocinador valido.');
+    }
+
     public function login(Request $request)
     {
         $validator = Validator::make($request->all(), [
@@ -58,12 +90,25 @@ class LoginController extends BaseController
             'name'     => 'required',
             'email'    => 'required|email',
             'dni'      => 'required',
-            'password' => 'required|min:8'
+            'password' => 'required|min:8',
+            'sponsor_code' => 'required|string|exists:users,uuid',
         ]);
 
         if ($validator->fails()) return $this->sendError('Error de validacion.', $validator->errors(), 422);
 
         try {
+            $sponsor = User::whereRaw('UPPER(uuid) = ?', [
+                strtoupper(trim((string) $request->sponsor_code)),
+            ])->first();
+
+            $network = new NetworkTreeService();
+            if (!$sponsor || !$network->belongsToNetwork('DOSB', $sponsor->uuid)) {
+                return $this->sendError(
+                    'El codigo de patrocinador no pertenece a la organizacion.',
+                    ['sponsor_code' => ['El codigo de patrocinador no es valido.']],
+                    422
+                );
+            }
 
             $userExists = User::where("email" , $request->email)->first();
 
@@ -72,6 +117,8 @@ class LoginController extends BaseController
             $userExistDni = User::where("uuid" , trim($request->dni))->first();
 
             if(  $userExistDni != null ) return $this->sendError( "Este DNI ya existe" );
+
+            DB::beginTransaction();
 
             $user = User::create([
                 'name'     => $request->name,
@@ -89,6 +136,13 @@ class LoginController extends BaseController
                 "state" => true
             ]);
 
+            SponsorRelation::create([
+                'user_code' => $user->uuid,
+                'sponsor_code' => $sponsor->uuid,
+                'source' => 'registration',
+                'state' => true,
+            ]);
+
             // $mailData = [
             //     'url' => env('APP_URL_FRONT') . '/auth/verification-code/'.$validation->id,
             //     'customer_name' => $request->name,
@@ -98,12 +152,16 @@ class LoginController extends BaseController
             // Mail::to( $request->email )->send(new CreateUserMail($mailData));
 
             $success['name']  = $user->name;
+            $success['sponsor_code'] = $sponsor->uuid;
+            $success['sponsor_name'] = $sponsor->name;
             $message          = '¡Genial! Se ha creado un usuario correctamente.';
             $success['validation'] = $validation->id;
 
-            return $this->sendResponse([], $message);
+            DB::commit();
+            return $this->sendResponse($success, $message);
 
-        } catch (Exception $e) {
+        } catch (\Throwable $e) {
+            if (DB::transactionLevel() > 0) DB::rollBack();
             $success['token'] = [];
             $message          = $e->getMessage();
             return $this->sendError( $e->getMessage() );

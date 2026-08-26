@@ -737,9 +737,20 @@ class UserController extends BaseController
 
             if (!$isActive && $ultimoPago) $ultimoPago->state = 6;
             $isActive = app(\App\Services\Core\ActivationService::class)->isActive($user);
+            $sponsorCode = $this->networkTreeService->sponsorCode($user->uuid);
+            $sponsor = $sponsorCode
+                ? User::whereRaw('UPPER(uuid) = ?', [strtoupper($sponsorCode)])->first()
+                : null;
             $userList[$key]->payment = $this->displayPaymentPayload($displayPayment, $isActive);
             $userList[$key]->active = $isActive;
             $userList[$key]->package_name = $user->package_name;
+            $userList[$key]->sponsor_code = $sponsor?->uuid;
+            $userList[$key]->sponsor_uuid = $sponsor?->uuid;
+            $userList[$key]->sponsor_name = $sponsor?->name;
+            $userList[$key]->sponsor = $sponsor ? [
+                'uuid' => $sponsor->uuid,
+                'name' => $sponsor->name,
+            ] : null;
             $activation = app(\App\Services\Core\ActivationService::class);
             $userList[$key]->active_product = $activation->isActiveForCategory($user, 'product');
             $userList[$key]->active_service = $activation->isActiveForCategory($user, 'service');
@@ -852,14 +863,21 @@ class UserController extends BaseController
                 'email' => $request->filled('userEmail') ? $request->userEmail : $userUpdated->email,
             ]);
 
-            $currentSponsor = PaymentOrderPoint::where('user_code', $userUpdated->uuid)
-                ->where('type', PaymentOrderPoint::COMPRA)
-                ->where('payment', 1)
-                ->latest()
-                ->value('sponsor_code');
+            // El patrocinador pertenece a la genealogia desde el registro y no
+            // depende de que el usuario ya tenga un punto de compra tipo B.
+            $currentSponsor = $this->networkTreeService->sponsorCode($userUpdated->uuid);
 
             $packId    = ($request->has('packId') && $request->packId > 0) ? $request->packId : null;
             $serviceId = ($request->has('serviceId') && $request->serviceId > 0) ? $request->serviceId : null;
+
+            if (($packId || $serviceId) && !$currentSponsor) {
+                DB::rollBack();
+                return $this->sendError(
+                    'El usuario no tiene un patrocinador valido para asignarle un pack.',
+                    [],
+                    422
+                );
+            }
 
             $processPackAdd = function ($packId, $categoryTarget) use ($userUpdated, $request, $currentSponsor) {
                 if (!$packId) return;
@@ -887,7 +905,7 @@ class UserController extends BaseController
                 $newOrder = PaymentOrder::create([
                     'currency'     => "PEN",
                     'amount'       => 0,
-                    'sponsor_code' => !empty($request->sponsorNew) ? $request->sponsorNew : $currentSponsor,
+                    'sponsor_code' => $currentSponsor,
                     'pack_id'      => $pack->id,
                     "token"        => 'AUTO-' . uniqid()
                 ]);
@@ -1353,8 +1371,18 @@ class UserController extends BaseController
             if ($inviteUser->state == false) return $this->sendResponse("", "El codigo de invitación esta desabilitado.", false);
             if ($inviteUser->expired_time < $dateNow) return $this->sendResponse("", "El codigo de invitación ha expirado.", false);
 
+            $sponsor = User::where('uuid', $inviteUser->sponsor_user_code)->first();
+            if (!$sponsor) {
+                DB::rollBack();
+                return $this->sendResponse("", "El patrocinador de la invitacion no existe.", false);
+            }
+
             DB::commit();
-            return $this->sendResponse($dataBody->token, '');
+            return $this->sendResponse([
+                'token' => $dataBody->token,
+                'sponsor_code' => $sponsor->uuid,
+                'sponsor_name' => $sponsor->name,
+            ], '');
         } catch (Exception $e) {
             DB::rollBack();
             return $this->sendError($e->getMessage(), [], 402);
@@ -1416,16 +1444,27 @@ class UserController extends BaseController
             $userId    = Auth::id();
             $userModel = User::with(['paymentActive'])->find($userId);
 
-            DB::beginTransaction();
-            $guestsTokenUser     = GuestsTokenUser::where("guest_user_code", $userModel->uuid)->where("state", true)->first();
-            if ($guestsTokenUser == null) {
+            if (!$userModel) {
+                return $this->sendResponse("", "Usuario no encontrado", false);
+            }
+
+            // sponsor_relations es la fuente actual del arbol. El servicio ya
+            // conserva compatibilidad con puntos de compra antiguos.
+            $sponsorCode = $this->networkTreeService->sponsorCode($userModel->uuid);
+
+            // Respaldo para invitaciones legacy que aun no fueron migradas.
+            if (!$sponsorCode) {
+                $sponsorCode = GuestsTokenUser::where("guest_user_code", $userModel->uuid)
+                    ->where("state", true)
+                    ->value('sponsor_user_code');
+            }
+
+            if (!$sponsorCode) {
                 return $this->sendResponse("", "No tiene ningun sponsor invitado", false);
             }
 
-            DB::commit();
-            return $this->sendResponse($guestsTokenUser->sponsor_user_code, '');
-        } catch (Exception $e) {
-            DB::rollBack();
+            return $this->sendResponse($sponsorCode, '');
+        } catch (\Throwable $e) {
             return $this->sendError($e->getMessage(), [], 402);
         }
     }

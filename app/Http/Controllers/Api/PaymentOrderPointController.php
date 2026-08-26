@@ -220,15 +220,17 @@ class PaymentOrderPointController extends BaseController
                 return $item;
             });
 
-            // BUSCAR PATROCINADOR REAL
-            $myActivation = PaymentOrderPoint::with('sponsor')
-                ->where('user_code', $userModel->uuid)
-                ->where('type', PaymentOrderPoint::COMPRA)
-                ->first();
+            // La genealogia existe desde el registro, incluso antes de que el
+            // socio realice su primera compra. sponsor_relations es la fuente
+            // actual y el servicio conserva el respaldo historico.
+            $sponsorCode = $this->networkTreeService->sponsorCode($userModel->uuid);
+            $sponsor = $sponsorCode
+                ? User::whereRaw('UPPER(uuid) = ?', [strtoupper($sponsorCode)])->first()
+                : null;
 
-            if ($myActivation && $myActivation->sponsor) {
-                $userModel->sponsor_name = $myActivation->sponsor->name;
-                $userModel->sponsor_uuid = $myActivation->sponsor_code;
+            if ($sponsor) {
+                $userModel->sponsor_name = $sponsor->name;
+                $userModel->sponsor_uuid = $sponsor->uuid;
             } else {
                 $userModel->sponsor_name = "Sistema";
                 $userModel->sponsor_uuid = "--";
