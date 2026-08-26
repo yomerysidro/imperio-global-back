@@ -627,13 +627,35 @@ class UserController extends BaseController
         if ($request->has('plan') && !empty($request->query('plan'))) {
             $plan = $request->query('plan');
             if ($plan == -1) {
-                $user_payments = PaymentLog::where('state', PaymentLog::PAGADO)->pluck('user_id')->toArray();
-                $userList = $userList->whereNotIn("id", $user_payments);
+                // Un pack adquirido es permanente. Que el periodo haya terminado o
+                // sido reseteado no significa que el usuario nunca tuvo un plan.
+                $serviceOwners = PaymentLog::whereIn('state', [
+                    PaymentLog::PAGADO,
+                    PaymentLog::TERMINADO,
+                    PaymentLog::RESET,
+                ])->pluck('user_id');
+                $productOwners = PaymentProductOrder::whereIn('state', [
+                    PaymentProductOrder::PAGADO,
+                    PaymentProductOrder::ENVIADO,
+                    PaymentProductOrder::TERMINADO,
+                ])->pluck('user_id');
+                $ownerIds = $serviceOwners->merge($productOwners)->filter()->unique()->values();
+                $userList = $userList->whereNotIn("id", $ownerIds);
             } else {
-                $user_payments_pack = PaymentLog::where('state', PaymentLog::PAGADO)->whereHas("paymentOrder.pack", function ($q) use ($plan) {
+                $serviceOwners = PaymentLog::whereIn('state', [
+                    PaymentLog::PAGADO,
+                    PaymentLog::TERMINADO,
+                    PaymentLog::RESET,
+                ])->whereHas("paymentOrder.pack", function ($q) use ($plan) {
                     $q->where('id', $plan);
-                })->pluck('user_id')->toArray();
-                $userList = $userList->whereIn("id", $user_payments_pack);
+                })->pluck('user_id');
+                $productOwners = PaymentProductOrder::whereIn('state', [
+                    PaymentProductOrder::PAGADO,
+                    PaymentProductOrder::ENVIADO,
+                    PaymentProductOrder::TERMINADO,
+                ])->where('pack_id', $plan)->pluck('user_id');
+                $ownerIds = $serviceOwners->merge($productOwners)->filter()->unique()->values();
+                $userList = $userList->whereIn("id", $ownerIds);
             }
         }
 
@@ -977,13 +999,7 @@ class UserController extends BaseController
             $ranges    = Range::where("state", true)->orderBy('points', 'asc')->get();
 
             foreach ($userList as $key => $user) {
-                $payment = PaymentLog::with(['paymentOrder.pack'])->where("user_id",  $user->id)
-                    ->where(function ($query) {
-                        $query->where('state', PaymentLog::PAGADO)
-                            ->orWhere('state', PaymentLog::TERMINADO);
-                    })
-                    ->orderBy('created_at', 'desc')
-                    ->first();
+                $payment = $this->latestOwnedPackagePayment($user->id);
                 $_userId                    = $user->id;
                 $_paymentProductOrderPoints = array_filter(
                     $paymentProductOrderPoints->toArray(),
@@ -1012,10 +1028,12 @@ class UserController extends BaseController
                 }
 
                 array_push($_userList, (object) [
-                    "estado"            => $payment == null ? "" : ($payment->state == PaymentLog::PAGADO ? "Activo" : "Desactivo"),
+                    "estado"            => $payment == null ? "" : (app(ActivationService::class)->isActive($user) ? "Activo" : "Desactivo"),
                     "nombres"           => $user->name,
                     "codigo"            => $user->uuid,
-                    "plan"              => $payment == null ? "Sin plan" : ($payment->paymentOrder->pack->title),
+                    "plan"              => $payment == null
+                        ? "Sin plan"
+                        : ($payment->paymentOrder?->pack?->title ?? $payment->pack?->title ?? "Sin plan"),
                     "bono_personal"     => $calculatorPoint->personal,
                     "bono_pratocinio"   => $calculatorPoint->patrocinio,
                     "bono_residual"     => $calculatorPoint->residual,
