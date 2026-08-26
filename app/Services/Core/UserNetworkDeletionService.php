@@ -73,15 +73,19 @@ class UserNetworkDeletionService
                     );
                 }
 
-                $childOrderIds = DB::table('payment_order_points')
-                    ->whereIn('user_code', $directChildCodes)
-                    ->where('type', 'B')
-                    ->where('sponsor_code', $rootUser->uuid)
-                    ->pluck('payment_order_id')->all();
+                // La relacion formal es la fuente de verdad, pero tambien se
+                // actualizan las referencias historicas que todavia consumen
+                // algunos reportes y flujos antiguos. No todos los usuarios
+                // legacy tienen un punto de compra tipo B.
+                $directChildIds = DB::table('users')
+                    ->whereIn('uuid', $directChildCodes)
+                    ->pluck('id')->all();
+                $childOrderIds = DB::table('payment_logs')
+                    ->whereIn('user_id', $directChildIds)
+                    ->pluck('payment_order_id')->filter()->unique()->all();
 
                 DB::table('payment_order_points')
                     ->whereIn('user_code', $directChildCodes)
-                    ->where('type', 'B')
                     ->where('sponsor_code', $rootUser->uuid)
                     ->update(['sponsor_code' => $replacementSponsorCode]);
                 DB::table('payment_orders')->whereIn('id', $childOrderIds)
