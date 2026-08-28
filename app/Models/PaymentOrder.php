@@ -31,6 +31,11 @@ class PaymentOrder extends Model
         return $this->hasOne(PaymentLog::class, 'payment_order_id', 'id');
     }
 
+    public function points()
+    {
+        return $this->hasMany(PaymentOrderPoint::class, 'payment_order_id', 'id');
+    }
+
     public function pack()
     {
         return $this->belongsTo(Pack::class, 'pack_id', 'id');

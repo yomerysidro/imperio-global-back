@@ -27,6 +27,7 @@ use App\Services\Core\PointCalculator;
 use App\Services\Core\NetworkTreeService;
 use App\Services\Core\CommissionService;
 use App\Services\Core\ActivationService;
+use App\Services\Core\InitialActivationDeactivationService;
 use App\Services\Core\FinancialLedgerService;
 use Maatwebsite\Excel\Facades\Excel;
 use App\Exports\ReportExcelUsers;
@@ -1137,6 +1138,46 @@ class FinanceController extends BaseController
         }
     }
 
+    public function deactivateInitialActivation(Request $request)
+    {
+        if (!Auth::user()?->is_admin) return $this->sendError('No tiene permisos ese usuario', [], 403);
+
+        $validator = Validator::make($request->all(), [
+            'userCode' => 'required|exists:users,uuid',
+            'category' => 'required|in:product,service',
+        ]);
+        if ($validator->fails()) return $this->sendError('Error de validacion.', $validator->errors(), 422);
+
+        try {
+            DB::beginTransaction();
+            $user = User::where('uuid', $request->input('userCode'))->lockForUpdate()->firstOrFail();
+            if ($user->is_admin || strcasecmp((string) $user->uuid, 'DOSB') === 0) {
+                DB::rollBack();
+                return $this->sendError('La cuenta corporativa o administrativa no puede desactivarse.', [], 422);
+            }
+
+            $result = app(InitialActivationDeactivationService::class)
+                ->deactivate($user, $request->input('category'));
+
+            $user->refresh();
+            $isActive = $user->active;
+            DB::commit();
+
+            return $this->sendResponse($result + [
+                'user_code' => $user->uuid,
+                'category' => $request->input('category'),
+                'active' => $isActive,
+                'points' => 0,
+            ], 'Activacion inicial desactivada. Se conservaron el usuario, la red, el paquete, el descuento y el historial.');
+        } catch (\DomainException $e) {
+            DB::rollBack();
+            return $this->sendError($e->getMessage(), [], 422);
+        } catch (Exception $e) {
+            DB::rollBack();
+            return $this->sendError($e->getMessage(), [], 402);
+        }
+    }
+
     public function commissionSummary(Request $request)
     {
         if (!Auth::user()?->is_admin) return $this->sendError('No tiene permisos ese usuario', [], 403);
@@ -1172,6 +1213,8 @@ class FinanceController extends BaseController
                 $reactivation = $reactivations->get($category);
                 $eligibility = $this->reactivationEligibility($user, $category);
                 $isActive = app(ActivationService::class)->isActiveForCategory($user, $category);
+                $canDeactivateInitial = app(InitialActivationDeactivationService::class)
+                    ->canDeactivate($user, $category);
                 $canReactivate = !$isActive && !$reactivation && $eligibility['eligible'];
                 return [$category => [
                     'is_active' => $isActive,
@@ -1186,6 +1229,7 @@ class FinanceController extends BaseController
                     'actions' => [
                         'can_reactivate' => $canReactivate,
                         'can_deactivate' => $reactivation !== null,
+                        'can_deactivate_initial_activation' => $canDeactivateInitial,
                     ],
                 ]];
             }
@@ -1209,6 +1253,7 @@ class FinanceController extends BaseController
             'actions' => $selected['actions'] + [
                 'reactivate_label' => 'Reactivar puntos',
                 'deactivate_label' => 'Desactivar puntos',
+                'deactivate_initial_activation_label' => 'Desactivar activacion inicial',
             ],
             'categories' => $categories,
         ], 'Estado de reactivacion');
@@ -1316,6 +1361,12 @@ class FinanceController extends BaseController
         if (!$firstPurchase) {
             return ['eligible' => false, 'reason' => 'no_package_purchase', 'eligible_from' => null,
                 'message' => 'El usuario aun no tiene una compra de paquete previa.'];
+        }
+
+        if (app(InitialActivationDeactivationService::class)->wasManuallyDeactivated($user, $category)) {
+            return ['eligible' => true, 'reason' => 'initial_activation_manually_deactivated',
+                'eligible_from' => now()->toIso8601String(),
+                'message' => 'La activacion inicial fue desactivada manualmente y puede reactivarse en este periodo.'];
         }
 
         $eligibleFrom = Carbon::parse($firstPurchase)->startOfMonth()->addMonth();
