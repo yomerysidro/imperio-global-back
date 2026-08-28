@@ -65,6 +65,7 @@ Route::prefix('v1')->group(function () {
             Route::post('reset-all', [FinanceController::class, 'resetAll']);
             Route::post('reset-all-points', [FinanceController::class, 'resetAllPoint']);
             Route::post('desactive', [FinanceController::class, 'desactive']);
+            Route::post('deactivate-initial-activation', [FinanceController::class, 'deactivateInitialActivation']);
             Route::post('active-residual', [FinanceController::class, 'activeResidual']);
             Route::get('reactivation-status/{userCode}', [FinanceController::class, 'reactivationStatus']);
             Route::get('reactivation-products/{userCode}', [FinanceController::class, 'reactivationProducts']);
