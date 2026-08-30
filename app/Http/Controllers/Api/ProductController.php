@@ -21,7 +21,7 @@ class ProductController extends BaseController
     {
         $user = Auth::guard('api')->user();
         $query = Product::with('file_image')->orderByDesc('created_at');
-        if (!$user?->is_admin) $query->where('state', true);
+        $this->applyCatalogVisibility($query, $user);
 
         $products = $query->get()->map(fn (Product $product) => $this->catalogProduct($product, $user));
         return $this->sendResponse($products, 'Productos obtenidos correctamente.');
@@ -31,7 +31,7 @@ class ProductController extends BaseController
     {
         $user = Auth::guard('api')->user();
         $product = Product::with('file_image')->find($productId);
-        if (!$product || (!$product->state && !$user?->is_admin)) {
+        if (!$product || !$this->isVisibleTo($product, $user)) {
             return $this->sendError('Producto no encontrado.', [], 404);
         }
 
@@ -41,7 +41,7 @@ class ProductController extends BaseController
     public function store(Request $request)
     {
         if ($response = $this->denyUnlessAdmin()) return $response;
-        $validator = Validator::make($request->all(), $this->rules());
+        $validator = $this->productValidator($request);
         if ($validator->fails()) return $this->sendError('Error de validacion.', $validator->errors(), 422);
 
         $product = DB::transaction(fn () => Product::create([
@@ -52,6 +52,9 @@ class ProductController extends BaseController
             'file' => $this->storeImage($request),
             'user_id' => Auth::id(),
             'state' => $request->boolean('state', false),
+            'is_promotion' => $request->boolean('is_promotion', false),
+            'promotion_start_at' => $request->boolean('is_promotion') ? $request->promotion_start_at : null,
+            'promotion_end_at' => $request->boolean('is_promotion') ? $request->promotion_end_at : null,
         ]));
 
         return $this->sendResponse($product->load('file_image'), 'Producto creado correctamente.');
@@ -63,7 +66,7 @@ class ProductController extends BaseController
         $product = Product::find($productId);
         if (!$product) return $this->sendError('Producto no encontrado.', [], 404);
 
-        $validator = Validator::make($request->all(), $this->rules(true));
+        $validator = $this->productValidator($request, $product);
         if ($validator->fails()) return $this->sendError('Error de validacion.', $validator->errors(), 422);
 
         $oldFileId = $product->file;
@@ -71,6 +74,19 @@ class ProductController extends BaseController
         DB::transaction(function () use ($request, $product, &$newFileId) {
             $data = $request->only(['title', 'price', 'points', 'stock']);
             if ($request->has('state')) $data['state'] = $request->boolean('state');
+            if ($request->has('is_promotion')) {
+                $data['is_promotion'] = $request->boolean('is_promotion');
+                if (!$data['is_promotion']) {
+                    $data['promotion_start_at'] = null;
+                    $data['promotion_end_at'] = null;
+                } else {
+                    $data['promotion_start_at'] = $request->promotion_start_at;
+                    $data['promotion_end_at'] = $request->promotion_end_at;
+                }
+            } elseif ($product->is_promotion) {
+                if ($request->has('promotion_start_at')) $data['promotion_start_at'] = $request->promotion_start_at;
+                if ($request->has('promotion_end_at')) $data['promotion_end_at'] = $request->promotion_end_at;
+            }
             if ($request->hasFile('file')) {
                 $newFileId = $this->storeImage($request);
                 $data['file'] = $newFileId;
@@ -130,8 +146,66 @@ class ProductController extends BaseController
             'points' => [$presence, 'integer', 'min:0'],
             'stock' => [$presence, 'integer', 'min:0'],
             'state' => ['sometimes', 'boolean'],
+            'is_promotion' => ['sometimes', 'boolean'],
+            'promotion_start_at' => ['sometimes', 'nullable', 'date'],
+            'promotion_end_at' => ['sometimes', 'nullable', 'date'],
             'file' => ['nullable', 'file', 'mimes:png,jpg,jpeg,webp', 'max:5120'],
         ];
+    }
+
+    private function productValidator(Request $request, ?Product $product = null)
+    {
+        $validator = Validator::make($request->all(), $this->rules($product !== null));
+        $validator->after(function ($validator) use ($request, $product) {
+            $isPromotion = $request->has('is_promotion')
+                ? $request->boolean('is_promotion')
+                : (bool) ($product?->is_promotion ?? false);
+            if (!$isPromotion) return;
+
+            $start = $request->has('promotion_start_at')
+                ? $request->input('promotion_start_at')
+                : $product?->promotion_start_at;
+            $end = $request->has('promotion_end_at')
+                ? $request->input('promotion_end_at')
+                : $product?->promotion_end_at;
+
+            if (blank($start)) $validator->errors()->add('promotion_start_at', 'La fecha de inicio es obligatoria para una promocion.');
+            if (blank($end)) $validator->errors()->add('promotion_end_at', 'La fecha de fin es obligatoria para una promocion.');
+            if (!blank($start) && !blank($end) && strtotime((string) $end) < strtotime((string) $start)) {
+                $validator->errors()->add('promotion_end_at', 'La fecha de fin debe ser posterior o igual a la fecha de inicio.');
+            }
+        });
+        return $validator;
+    }
+
+    private function applyCatalogVisibility($query, ?User $user): void
+    {
+        if ($user?->is_admin) return;
+
+        $query->where('state', true);
+        if (!$user) {
+            $query->where('is_promotion', false);
+            return;
+        }
+
+        $query->where(function ($visibility) {
+            $visibility->where('is_promotion', false)
+                ->orWhere(function ($promotion) {
+                    $promotion->where('is_promotion', true)
+                        ->where('promotion_start_at', '<=', now())
+                        ->where('promotion_end_at', '>=', now());
+                });
+        });
+    }
+
+    private function isVisibleTo(Product $product, ?User $user): bool
+    {
+        if ($user?->is_admin) return true;
+        if (!$product->state) return false;
+        if (!$product->is_promotion) return true;
+        if (!$user || !$product->promotion_start_at || !$product->promotion_end_at) return false;
+
+        return now()->between($product->promotion_start_at, $product->promotion_end_at, true);
     }
 
     private function catalogProduct(Product $product, ?User $user): Product

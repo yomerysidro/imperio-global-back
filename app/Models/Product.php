@@ -24,6 +24,9 @@ class Product extends Model
         'file',
         'user_id',
         'state',
+        'is_promotion',
+        'promotion_start_at',
+        'promotion_end_at',
         'reactivation_category',
     ];
 
@@ -38,6 +41,9 @@ class Product extends Model
             'points' => 'integer',
             'stock' => 'integer',
             'state' => 'boolean',
+            'is_promotion' => 'boolean',
+            'promotion_start_at' => 'datetime',
+            'promotion_end_at' => 'datetime',
         ];
     }
 
