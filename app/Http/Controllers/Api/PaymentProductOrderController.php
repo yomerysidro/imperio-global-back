@@ -224,15 +224,34 @@ class PaymentProductOrderController extends BaseController
         }
     }
 
-    public function points()
+    public function points(Request $request)
     {
+        $validator = Validator::make($request->query(), [
+            'month' => 'nullable|integer|between:1,12',
+            'year' => 'nullable|integer|digits:4',
+        ]);
+
+        if ($validator->fails()) {
+            return $this->sendError('Error de validacion.', $validator->errors(), 422);
+        }
+
         try {
             DB::beginTransaction();
 
             $userId = Auth::id();
-            $userCurrent = User::find($userId);
+            $query = PaymentProductOrderPoint::query()
+                ->where('user_id', $userId)
+                ->where('state', true);
 
-            $paymentProductOrderPoint = PaymentProductOrderPoint::where("user_id" , $userId)->where("state" , true)->get();
+            if ($request->filled('month')) {
+                $query->whereMonth('created_at', (int) $request->query('month'));
+            }
+
+            if ($request->filled('year')) {
+                $query->whereYear('created_at', (int) $request->query('year'));
+            }
+
+            $paymentProductOrderPoint = $query->orderBy('created_at')->get();
 
             DB::commit();
 
