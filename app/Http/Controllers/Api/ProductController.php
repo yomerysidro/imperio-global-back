@@ -2,210 +2,186 @@
 
 namespace App\Http\Controllers\Api;
 
-use App\Http\Controllers\Controller;
-use Illuminate\Http\Request;
-use App\Http\Controllers\BaseController as BaseController;
-use Exception;
-use Illuminate\Support\Facades\Validator;
-use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Auth;
-use Illuminate\Support\Facades\Storage;
-use App\Models\User;
-use App\Models\Product;
+use App\Http\Controllers\BaseController;
 use App\Models\File;
-use App\Models\PaymentProductOrder;
+use App\Models\PaymentLog;
 use App\Models\PaymentProductOrderDetail;
+use App\Models\Product;
 use App\Models\ProductPointPack;
-use App\Services\Flow\FlowPayment;
+use App\Models\User;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\Validator;
 
 class ProductController extends BaseController
 {
-    //
-
-    private $flowPayment;
-
-    public function __construct()
+    public function index(Request $request)
     {
-        $this->flowPayment = new FlowPayment();
+        $user = Auth::guard('api')->user();
+        $query = Product::with('file_image')->orderByDesc('created_at');
+        if (!$user?->is_admin) $query->where('state', true);
+
+        $products = $query->get()->map(fn (Product $product) => $this->catalogProduct($product, $user));
+        return $this->sendResponse($products, 'Productos obtenidos correctamente.');
     }
 
-    public function register( Request $request )
+    public function show(string $productId)
     {
-        try {
-            $validator = Validator::make( $request->all() , [
-                'title'    => 'required',
-                'price' => 'required|numeric',
-                'points'    => 'required|numeric',
-                'file' => 'nullable|file|mimes:png,jpg,jpeg|max:2048',
-            ]);
-            if ($validator->fails()) return $this->sendError('Error de validacion.', $validator->errors(), 422);
+        $user = Auth::guard('api')->user();
+        $product = Product::with('file_image')->find($productId);
+        if (!$product || (!$product->state && !$user?->is_admin)) {
+            return $this->sendError('Producto no encontrado.', [], 404);
+        }
 
-            DB::beginTransaction();
-            $user_id = Auth::id();
+        return $this->sendResponse($this->catalogProduct($product, $user), 'Producto obtenido correctamente.');
+    }
 
-            $userModel = User::with(['file'])->find($user_id);
+    public function store(Request $request)
+    {
+        if ($response = $this->denyUnlessAdmin()) return $response;
+        $validator = Validator::make($request->all(), $this->rules());
+        if ($validator->fails()) return $this->sendError('Error de validacion.', $validator->errors(), 422);
 
-            if( !$userModel->is_admin ) return $this->sendError( "No tiene permisos ese usuario" );
+        $product = DB::transaction(fn () => Product::create([
+            'title' => trim($request->title),
+            'price' => $request->price,
+            'points' => $request->points,
+            'stock' => $request->stock,
+            'file' => $this->storeImage($request),
+            'user_id' => Auth::id(),
+            'state' => $request->boolean('state', false),
+        ]));
 
-            $fileId = 0;
+        return $this->sendResponse($product->load('file_image'), 'Producto creado correctamente.');
+    }
 
-            $dataBody = (object) $request->all();
+    public function update(Request $request, string $productId)
+    {
+        if ($response = $this->denyUnlessAdmin()) return $response;
+        $product = Product::find($productId);
+        if (!$product) return $this->sendError('Producto no encontrado.', [], 404);
 
-            if($request->hasfile('file'))
-            {
-                $filePath = Storage::disk('public')->put('files/products', $request->file('file'));
-                $fileModel = File::create(array(
-                    'path' => $filePath,
-                    'name' => $request->file('file')->getClientOriginalName(),
-                    'extension' => $request->file('file')->getClientOriginalExtension(),
-                    'size' => $request->file('file')->getSize()
-                ));
-                $fileId = $fileModel->id;
+        $validator = Validator::make($request->all(), $this->rules(true));
+        if ($validator->fails()) return $this->sendError('Error de validacion.', $validator->errors(), 422);
+
+        $oldFileId = $product->file;
+        $newFileId = null;
+        DB::transaction(function () use ($request, $product, &$newFileId) {
+            $data = $request->only(['title', 'price', 'points', 'stock']);
+            if ($request->has('state')) $data['state'] = $request->boolean('state');
+            if ($request->hasFile('file')) {
+                $newFileId = $this->storeImage($request);
+                $data['file'] = $newFileId;
             }
+            $product->update($data);
+        });
+        if ($newFileId && $oldFileId) $this->deleteImage($oldFileId);
 
-            $productModel = Product::create(
-                array(
-                    'title'     => $dataBody->title,
-                    'price'     => $dataBody->price,
-                    'points'    => $dataBody->points,
-                    'stock'     => $dataBody?->stock ?? 100,
-                    'file'      => $fileId,
-                    'user_id'   => $user_id
-                )
+        return $this->sendResponse($product->fresh('file_image'), 'Producto actualizado correctamente.');
+    }
+
+    public function destroy(string $productId)
+    {
+        if ($response = $this->denyUnlessAdmin()) return $response;
+        $product = Product::find($productId);
+        if (!$product) return $this->sendError('Producto no encontrado.', [], 404);
+
+        if (PaymentProductOrderDetail::where('product_id', $product->id)->exists()) {
+            return $this->sendError(
+                'No se puede eliminar porque el producto tiene ventas registradas. Puede despublicarlo.',
+                [],
+                409
             );
-
-            DB::commit();
-
-            return $this->sendResponse( $productModel->id, 'Creado');
-
-        } catch (Exception $e) {
-            DB::rollBack();
-            return $this->sendError( $e->getMessage() );
         }
+
+        $fileId = $product->file;
+        DB::transaction(function () use ($product) {
+            ProductPointPack::where('product_id', $product->id)->delete();
+            $product->delete();
+        });
+        if ($fileId) $this->deleteImage($fileId);
+
+        return $this->sendResponse(true, 'Producto eliminado definitivamente.');
     }
 
-    public function update( Request $request , string $productId)
+    public function changeStatus(Request $request, string $productId)
     {
-        try {
-            $validator = Validator::make( $request->all() , [
-                'title'    => 'required',
-                'price' => 'required|numeric',
-                'points'    => 'required|numeric',
-                'file' => 'nullable|file|mimes:png,jpg,jpeg|max:2048',
-            ]);
+        if ($response = $this->denyUnlessAdmin()) return $response;
+        $validator = Validator::make($request->all(), ['state' => 'required|boolean']);
+        if ($validator->fails()) return $this->sendError('Error de validacion.', $validator->errors(), 422);
 
-            if ($validator->fails()) return $this->sendError('Error de validacion.', $validator->errors(), 422);
-
-            DB::beginTransaction();
-            $user_id = Auth::id();
-
-            $userModel = User::with(['file'])->find($user_id);
-
-            if( !$userModel->is_admin ) return $this->sendError( "No tiene permisos ese usuario" );
-
-            $fileId = 0;
-
-            $dataBody = (object) $request->all();
-
-            if($request->hasfile('file'))
-            {
-                $filePath = Storage::disk('public')->put('files/products', $request->file('file'));
-
-                $fileModel = File::create(array(
-                    'path' => $filePath,
-                    'name' => $request->file('file')->getClientOriginalName(),
-                    'extension' => $request->file('file')->getClientOriginalExtension(),
-                    'size' => $request->file('file')->getSize()
-                ));
-                $fileId = $fileModel->id;
-            }
-
-            Product::where("id" , $productId)->update(
-                array(
-                    'title'     => $dataBody->title,
-                    'price'     => $dataBody->price,
-                    'points'    => $dataBody->points,
-                    'stock'     => $dataBody?->stock ?? 100,
-                )
-            );
-            if( $fileId > 0 ){
-                Product::where("id" , $productId)->update(
-                    array( 'file'      => $fileId )
-                );
-            }
-
-            DB::commit();
-
-            return $this->sendResponse( $productId, 'Update');
-
-        } catch (Exception $e) {
-            DB::rollBack();
-            return $this->sendError( $e->getMessage() );
-        }
+        $product = Product::find($productId);
+        if (!$product) return $this->sendError('Producto no encontrado.', [], 404);
+        $product->update(['state' => $request->boolean('state')]);
+        return $this->sendResponse($product->fresh('file_image'), $product->state ? 'Producto publicado.' : 'Producto despublicado.');
     }
 
-    public function search()
+    public function register(Request $request) { return $this->store($request); }
+    public function search(Request $request) { return $this->index($request); }
+
+    private function rules(bool $partial = false): array
     {
-        try {
-            $productList = Product::with(['file_image'])->orderBy('created_at', 'desc')->get()
-                ->map(function (Product $product) {
-                    $product->base_points = (float) $product->points;
-                    $configuredPoints = ProductPointPack::where('product_id', $product->id)->max('point');
-                    $product->points = (float) ($configuredPoints ?? $product->points ?? 0);
-                    return $product;
-                });
-
-            return $this->sendResponse( $productList , 'Lista');
-        } catch (Exception $e) {
-            return $this->sendError( $e->getMessage() );
-        }
+        $presence = $partial ? 'sometimes' : 'required';
+        return [
+            'title' => [$presence, 'string', 'max:255'],
+            'price' => [$presence, 'numeric', 'min:0'],
+            'points' => [$presence, 'integer', 'min:0'],
+            'stock' => [$presence, 'integer', 'min:0'],
+            'state' => ['sometimes', 'boolean'],
+            'file' => ['nullable', 'file', 'mimes:png,jpg,jpeg,webp', 'max:5120'],
+        ];
     }
 
-    public function points( Request $request )
+    private function catalogProduct(Product $product, ?User $user): Product
     {
-        try {
-            DB::beginTransaction();
-            $user_id = Auth::id();
-            $userModel = User::with(['file'])->find($user_id);
-            if( !$userModel->is_admin ) return $this->sendError( "No tiene permisos ese usuario" );
-            $dataBody = (object) $request->all();
-
-            foreach ($dataBody->points as $key => $p) {
-                $p = (object) $p;
-                $productPointPack = ProductPointPack::where("product_id" , $p->product_id )->where("pack_id" , $p->pack_id)->first();
-                if( $productPointPack == null ){
-                    ProductPointPack::create(array(
-                        'product_id'    => $p->product_id,
-                        'pack_id'       => $p->pack_id,
-                        'point'         => $p->point
-                    ));
-                }else{
-                    ProductPointPack::where("product_id" , $p->product_id )->where("pack_id" , $p->pack_id)->update(array(
-                        'point'  => $p->point
-                    ));
-                }
-            }
-
-            $productPointPackList = ProductPointPack::with(['pack:id,title','product:id,title'])->get();
-
-            DB::commit();
-            return $this->sendResponse( $productPointPackList , 'Lista');
-        } catch (Exception $e) {
-            DB::rollBack();
-            return $this->sendError( $e->getMessage() );
-        }
+        $discount = $this->discountFor($user);
+        $publicPrice = round((float) $product->price, 2);
+        $product->setAttribute('public_price', $publicPrice);
+        $product->setAttribute('discount_percentage', $discount);
+        $product->setAttribute('final_price', round($publicPrice * (100 - $discount) / 100, 2));
+        $product->setAttribute('points', (int) $product->points);
+        return $product;
     }
 
-    public function pointsSearch( Request $request )
+    private function discountFor(?User $user): float
     {
-        try {
-            $productList = ProductPointPack::with([])->orderBy('created_at', 'desc')->get();
-
-            return $this->sendResponse( $productList , 'Lista');
-        } catch (Exception $e) {
-            return $this->sendError( $e->getMessage() );
-        }
+        if (!$user || $user->is_admin) return 0;
+        $payment = PaymentLog::query()
+            ->join('payment_orders', 'payment_orders.id', '=', 'payment_logs.payment_order_id')
+            ->join('packs', 'packs.id', '=', 'payment_orders.pack_id')
+            ->where('payment_logs.user_id', $user->id)
+            ->where('payment_logs.confirm', true)
+            ->whereIn('payment_logs.state', [PaymentLog::PAGADO, PaymentLog::TERMINADO])
+            ->latest('payment_logs.created_at')
+            ->first(['packs.discount']);
+        return max(0, min(100, (float) ($payment?->discount ?? 0)));
     }
 
+    private function denyUnlessAdmin()
+    {
+        return Auth::user()?->is_admin ? null : $this->sendError('Solo un administrador puede gestionar productos.', [], 403);
+    }
 
+    private function storeImage(Request $request): ?int
+    {
+        if (!$request->hasFile('file')) return null;
+        $uploaded = $request->file('file');
+        $path = Storage::disk('public')->put('files/products', $uploaded);
+        return File::create([
+            'path' => $path,
+            'name' => $uploaded->getClientOriginalName(),
+            'extension' => $uploaded->getClientOriginalExtension(),
+            'size' => $uploaded->getSize(),
+        ])->id;
+    }
+
+    private function deleteImage(int $fileId): void
+    {
+        $file = File::find($fileId);
+        if (!$file) return;
+        Storage::disk('public')->delete($file->path);
+        $file->delete();
+    }
 }

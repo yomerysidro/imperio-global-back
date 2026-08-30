@@ -31,6 +31,16 @@ class Product extends Model
         'user_id'
     ];
 
+    protected function casts(): array
+    {
+        return [
+            'price' => 'decimal:2',
+            'points' => 'integer',
+            'stock' => 'integer',
+            'state' => 'boolean',
+        ];
+    }
+
     public function file_image()
     {
         return $this->hasOne(File::class , 'id' , 'file');

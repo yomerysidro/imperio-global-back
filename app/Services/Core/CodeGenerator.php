@@ -11,7 +11,7 @@ class CodeGenerator
 
         return collect(range(0, $length - 1))
             ->map(function () use ($characters) {
-                return $characters[rand(0, count($characters) - 1)];
+                return $characters[random_int(0, count($characters) - 1)];
             })
             ->join('');
     }

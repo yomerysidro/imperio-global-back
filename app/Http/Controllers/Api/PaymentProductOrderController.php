@@ -19,7 +19,6 @@ use App\Models\PaymentLog;
 use App\Models\PaymentOrder;
 use App\Models\PaymentProductOrderPoint;
 use App\Models\Pack;
-use App\Models\ProductPointPack;
 use App\Http\Controllers\BaseController as BaseController;
 use App\Http\Resources\PaginationCollection;
 use App\Models\Option;
@@ -311,15 +310,7 @@ class PaymentProductOrderController extends BaseController
                 $productDetail = (object) $dataBody->details[$keyDetail];
 
                 $totalAmount += ( $product->price *  $productDetail->quantity );
-                if( $packId != null ){
-                    $productPointPack = ProductPointPack::where("product_id" , $product->id )->where("pack_id" , $packId)->first();
-                    if(  $productPointPack == null ) $totalPoints += $product->points * $productDetail->quantity;
-                    else{
-                        $totalPoints += $productPointPack->point * $productDetail->quantity;
-                    }
-                }else{
-                    $totalPoints += $product->points * $productDetail->quantity;
-                }
+                $totalPoints += $product->points * $productDetail->quantity;
 
             }
 
@@ -363,7 +354,7 @@ class PaymentProductOrderController extends BaseController
                         'quantity'                  => $productDetail->quantity,
                         'price'                     => $product->price,
                         'subtotal'                  => $product->price * $productDetail->quantity,
-                        'points'                    => $product->points,
+                        'points'                    => $product->points * $productDetail->quantity,
                         'created_at'                => now(),
                         'updated_at'                => now(),
                     )
@@ -476,15 +467,7 @@ class PaymentProductOrderController extends BaseController
                 $productDetail = (object) $dataBody->details[$keyDetail];
 
                 $totalAmount += ( $product->price *  $productDetail->quantity );
-                if( $packId != null ){
-                    $productPointPack = ProductPointPack::where("product_id" , $product->id )->where("pack_id" , $packId)->first();
-                    if(  $productPointPack == null ) $totalPoints += 0;
-                    else{
-                        $totalPoints += $productPointPack->point *  $productDetail->quantity;
-                    }
-                }else{
-                    $totalPoints += 0;
-                }
+                $totalPoints += $product->points * $productDetail->quantity;
 
             }
 
@@ -529,9 +512,7 @@ class PaymentProductOrderController extends BaseController
                 $productDetail = (object) $dataBody->details[$keyDetail];
                 $price = $product->price;
                 $subtotal = $product->price * $productDetail->quantity;
-                $_points = 0;
-                $productPointPack = ProductPointPack::where("product_id" , $product->id )->where("pack_id" , $packId)->first();
-                if(  $productPointPack != null ) $_points = $productPointPack->point *  $productDetail->quantity;
+                $_points = $product->points * $productDetail->quantity;
 
 
                 if( $discount > 0 ){
@@ -834,7 +815,7 @@ class PaymentProductOrderController extends BaseController
                 $productDetail = (object) $dataBody->details[$keyDetail];
 
                 $totalAmount += ( $product->price *  $productDetail->quantity );
-                $totalPoints += $product->points;
+                $totalPoints += $product->points * $productDetail->quantity;
 
             }
 
@@ -868,7 +849,7 @@ class PaymentProductOrderController extends BaseController
                     'quantity'                  => $productDetail->quantity,
                     'price'                     => $product->price,
                     'subtotal'                  => $product->price * $productDetail->quantity,
-                    'points'                    => $product->points,
+                    'points'                    => $product->points * $productDetail->quantity,
                     'created_at'                => now(),
                     'updated_at'                => now(),
                 );
@@ -993,15 +974,7 @@ class PaymentProductOrderController extends BaseController
                 $productDetail = (object) $dataBody->details[$keyDetail];
 
                 $totalAmount += ( $product->price *  $productDetail->quantity );
-                if( $packId != null ){
-                    $productPointPack = ProductPointPack::where("product_id" , $product->id )->where("pack_id" , $packId)->first();
-                    if(  $productPointPack == null ) $totalPoints += 0;
-                    else{
-                        $totalPoints += $productPointPack->point *  $productDetail->quantity;
-                    }
-                }else{
-                    $totalPoints += 0;
-                }
+                $totalPoints += $product->points * $productDetail->quantity;
 
             }
 
@@ -1035,9 +1008,7 @@ class PaymentProductOrderController extends BaseController
                 $productDetail = (object) $dataBody->details[$keyDetail];
                 $price = $product->price;
                 $subtotal = $product->price * $productDetail->quantity;
-                $_points = 0;
-                $productPointPack = ProductPointPack::where("product_id" , $product->id )->where("pack_id" , $packId)->first();
-                if(  $productPointPack != null ) $_points = $productPointPack->point *  $productDetail->quantity;
+                $_points = $product->points * $productDetail->quantity;
 
                 if( $discount > 0 ){
                     $price = $price * (100 - $discount) /100;

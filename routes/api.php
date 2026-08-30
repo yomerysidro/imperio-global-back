@@ -21,11 +21,12 @@ Route::prefix('v1')->group(function () {
 
     // --- GRUPO PÚBLICO ---
     Route::post('login', [LoginController::class, 'login']);
-    Route::post('reset-password', [LoginController::class, 'resetPassword']);
     Route::post('auth/register', [LoginController::class, 'register']);
     Route::get('auth/sponsor-verify', [LoginController::class, 'verifySponsor']);
-    Route::post('auth/recover-password', [LoginController::class, 'recover']);
-    Route::post('auth/validate-code/{uuid}', [LoginController::class, 'validate']);
+    Route::post('auth/recover-password', [LoginController::class, 'recover'])
+        ->middleware('throttle:5,1');
+    Route::post('auth/validate-code/{uuid}', [LoginController::class, 'validate'])
+        ->middleware('throttle:5,1');
     Route::get('auth/export', [UserController::class, 'export']);
 
     Route::post('payment/flow/confirm/{uuid}', [PaymentOrderController::class, 'flowConfirm']);
@@ -37,6 +38,9 @@ Route::prefix('v1')->group(function () {
     Route::get('option/search', [OptionController::class, 'search']);
     Route::get('pack/search', [PackController::class, 'search']);
     Route::post('users/invited-verify', [UserController::class, 'invitedVerify']);
+    Route::get('product', [ProductController::class, 'index']);
+    Route::get('product/search', [ProductController::class, 'search']);
+    Route::get('product/{productId}', [ProductController::class, 'show'])->whereUuid('productId');
 
     // --- GRUPO PROTEGIDO ---
     Route::middleware('auth:api')->group(function () {
@@ -110,11 +114,11 @@ Route::prefix('v1')->group(function () {
         });
 
         Route::prefix('product')->group(function () {
-            Route::post('/', [ProductController::class, 'register']);
-            Route::get('search', [ProductController::class, 'search']);
+            Route::post('/', [ProductController::class, 'store']);
+            Route::put('{productId}', [ProductController::class, 'update'])->whereUuid('productId');
+            Route::delete('{productId}', [ProductController::class, 'destroy'])->whereUuid('productId');
+            Route::put('{productId}/status', [ProductController::class, 'changeStatus'])->whereUuid('productId');
             Route::post('update/{productId}', [ProductController::class, 'update']);
-            Route::post('points', [ProductController::class, 'points']);
-            Route::get('points/search', [ProductController::class, 'pointsSearch']);
             Route::post('payment/offline', [PaymentProductOrderController::class, 'paymentOffline']);
             Route::post('payment/offline-confirm', [PaymentProductOrderController::class, 'paymentOfflineConfirm']);
             Route::get('payment/find-all', [PaymentProductOrderController::class, 'findAll']);
