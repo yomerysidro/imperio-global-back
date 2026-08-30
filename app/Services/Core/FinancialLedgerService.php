@@ -40,6 +40,12 @@ class FinancialLedgerService
         ) {
             $user = $users->get(strtoupper((string) $movement->user_code));
             if (!$user) return false;
+            // La actividad se valida al generar el residual. Una comisión ya
+            // ganada no desaparece del historial si el socio vence después.
+            if (in_array($movement->type, [
+                PaymentOrderPoint::RESIDUAL,
+                PaymentOrderPoint::RESIDUAL_SERVICIO,
+            ], true)) return true;
             $category = $movement->type === PaymentOrderPoint::RESIDUAL_SERVICIO ? 'service'
                 : ($movement->type === PaymentOrderPoint::RESIDUAL ? 'product' : null);
             return $category

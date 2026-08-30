@@ -81,6 +81,8 @@ class CommissionService
             $visited[$normalizedSponsor] = true;
             $sponsorUser = User::where('uuid', $currentSponsorCode)->first();
             if (!$sponsorUser) break;
+            $isCompanySponsor = $sponsorUser->is_admin
+                || strcasecmp((string) $sponsorUser->uuid, 'DOSB') === 0;
 
             $sponsorPack = null;
 
@@ -147,8 +149,10 @@ class CommissionService
                 ]);
             }
 
-            if ($debeGenerarBono && $sponsorPack
-                && app(ActivationService::class)->isActive($sponsorUser)) {
+            if ($debeGenerarBono && (
+                $isCompanySponsor
+                || ($sponsorPack && app(ActivationService::class)->isActive($sponsorUser))
+            )) {
                 // El porcentaje corresponde al paquete que originó la afiliación,
                 // no al paquete personal del beneficiario.
                 $sponsorshipConfig = CommissionRule::where('bonus_type', CommissionRule::SPONSORSHIP)
@@ -218,6 +222,9 @@ class CommissionService
 
     ActivationService::clearCache();
     $userCurrent->refresh();
+    // Solo los extremos deben estar activos: quien origina el volumen y
+    // quien recibe la comisión. La actividad de usuarios intermedios nunca
+    // interviene ni corta el recorrido ascendente.
     if (!app(ActivationService::class)->isActiveForCategory($userCurrent, $category)) {
         $summary['blocked'][] = ['reason' => 'source_user_inactive'];
         return $summary;
@@ -249,6 +256,10 @@ class CommissionService
                 $point = 0;
                 $beneficiaryCode = $_paymentOrderPoint->sponsor_code;
                 $beneficiary = User::where('uuid', $beneficiaryCode)->first();
+                $isCompany = $beneficiary && (
+                    $beneficiary->is_admin
+                    || strcasecmp((string) $beneficiary->uuid, 'DOSB') === 0
+                );
                 $beneficiaryRangeOrder = (int) ($beneficiary?->range?->range?->order ?? 0);
                 $rule = CommissionRule::with('minimumRange')->where('bonus_type', CommissionRule::RESIDUAL)
                     ->where('category', $category)
@@ -260,7 +271,7 @@ class CommissionService
                 // Los tres primeros niveles no requieren rango. Esta regla vive
                 // tambien en codigo para que se aplique desde el despliegue,
                 // incluso antes de sincronizar la configuracion de la BD.
-                $meetsRangeRequirement = $category === 'service' || $countLevel <= 3
+                $meetsRangeRequirement = $isCompany || $category === 'service' || $countLevel <= 3
                     || $beneficiaryRangeOrder >= $requiredRangeOrder;
                 $percent = ($rule && $beneficiary && $isActive && $meetsRangeRequirement)
                     ? (float) $rule->percentage : 0;

@@ -11,6 +11,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use App\Services\Core\Services\ServiceTreeManager;
+use App\Services\Core\CommissionService;
 
 class ServiceOrderController extends BaseController
 {
@@ -68,6 +69,17 @@ class ServiceOrderController extends BaseController
             // 3. DISTRIBUIR PUNTOS A LOS PATROCINADORES (Hacia arriba)
             $treeManager = new ServiceTreeManager();
             $treeManager->distributePoints($user->uuid, $order->id, $pack->points, $pack->id);
+
+            // El servicio ya esta pagado antes de calcular el residual. El
+            // motor recorre toda la linea aunque haya inactivos intermedios y
+            // acredita RS a cada beneficiario activo que cumpla su nivel.
+            (new CommissionService())->confirmPointAfiliado(
+                $user,
+                (float) $pack->points,
+                null,
+                $order->id,
+                'service'
+            );
 
             DB::commit();
             return $this->sendResponse($order, 'Paquete de servicio activado exitosamente.');
