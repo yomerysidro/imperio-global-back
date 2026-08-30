@@ -39,6 +39,7 @@ use App\Models\SponsorRelation;
 use App\Models\ManualReactivation;
 use App\Services\Core\RangeQualificationService;
 use App\Services\Core\UserNetworkDeletionService;
+use App\Services\Core\FinancialLedgerService;
 
 class UserController extends BaseController
 {
@@ -346,9 +347,27 @@ class UserController extends BaseController
         // 🔥 CORRECCIÓN 3: CALCULAR PUNTOS POR TIPO (Todos los tipos)
         $puntosPersonales = $paymentOrderPointsUser->where('type', 'B')->sum('point'); // COMPRA
         $puntosRed        = $paymentOrderPointsUser->where('type', 'G')->sum('point'); // GRUPAL
-        $puntosResiduales = $this->commissionTotal($paymentOrderPointsUser, ['R', 'RS']);
+        $residualProducto = $this->commissionTotal($paymentOrderPointsUser, ['R']);
+        $residualServicio = $this->commissionTotal($paymentOrderPointsUser, ['RS']);
+        $puntosResiduales = $residualProducto + $residualServicio;
         $gananciaPatrocinio = $this->sponsorshipTotal($paymentOrderPointsUser);
         $puntosInfinito   = $paymentOrderPointsUser->where('type', 'I')->sum('point'); // INFINITO
+
+        // DOSB es la cuenta corporativa y no depende de plan, actividad ni
+        // rango. Su Home usa el mismo libro que Finanzas/Excel para evitar que
+        // una segunda lógica deje en cero comisiones que sí existen.
+        if ($userModel->is_admin || strcasecmp((string) $userModel->uuid, 'DOSB') === 0) {
+            $companyCommissions = app(FinancialLedgerService::class)->summary(
+                Carbon::create($anioFiltro, $mesFiltro, 1)->startOfMonth(),
+                Carbon::create($anioFiltro, $mesFiltro, 1)->endOfMonth(),
+                $userModel->uuid
+            );
+            $gananciaPatrocinio = (float) $companyCommissions['patrocinio'];
+            $residualProducto = (float) $companyCommissions['residualProducto'];
+            $residualServicio = (float) $companyCommissions['residualServicio'];
+            $puntosResiduales = (float) $companyCommissions['residual'];
+            $puntosInfinito = (float) $companyCommissions['infinito'];
+        }
 
         // 🔥 CORRECCIÓN 4: TOTAL DE PUNTOS PARA RANGO = COMPRA + GRUPAL + RESIDUAL
         // El volumen para rango contiene solamente puntos de compra y de red.
@@ -411,6 +430,8 @@ class UserController extends BaseController
             $userModel->points = (object) [
                 'patrocinio'         => (float) $gananciaPatrocinio,
                 'residual'           => (float) $puntosResiduales,
+                'residualProducto'   => (float) $residualProducto,
+                'residualServicio'   => (float) $residualServicio,
                 'compra'             => (object) ['total_puntos' => 0],
                 'pointGroup'         => (float) $monthlyGroupVolume,
                 'pointGroupMonthly'  => (float) $monthlyGroupVolume,
@@ -424,7 +445,6 @@ class UserController extends BaseController
                 'personalGlobal'     => 0,
                 'patrocinioRequest'  => 0,
                 'patrocinioServicio' => 0,
-                'residualServicio'   => 0,
                 'legacy_bonus'       => 0,
                 'total_general'      => (float) $monthlyGroupVolume,
                 'total_comisiones'   => (float) $totalComisiones
@@ -461,6 +481,8 @@ class UserController extends BaseController
             $userModel->points = (object) [
                 'patrocinio'          => $gananciaPatrocinio, // Bono por reclutar (P + S)
                 'residual'            => $puntosResiduales,   // Bono residual (R)
+                'residualProducto'    => $residualProducto,
+                'residualServicio'    => $residualServicio,
                 'compra'              => (object) ['total_puntos' => $puntosPersonales], // Puntos personales (B)
                 'pointGroup'          => $puntosRed,          // Puntos grupales (G)
                 'personal'            => $puntosPersonales,   // Puntos personales (B)
@@ -473,7 +495,6 @@ class UserController extends BaseController
                 'personalGlobal'      => 0,
                 'patrocinioRequest'   => 0,
                 'patrocinioServicio'  => 0,
-                'residualServicio'    => 0,
                 'puntos_personales'   => $puntosPersonales,
                 'puntos_red'          => $puntosRed,
                 'ganancia_patrocinio' => $gananciaPatrocinio,
@@ -517,6 +538,8 @@ class UserController extends BaseController
             'puntos_red'          => $puntosRed,
             'ganancia_patrocinio' => $gananciaPatrocinio,
             'puntos_residuales'   => $puntosResiduales,
+            'residual_producto'   => $residualProducto,
+            'residual_servicio'   => $residualServicio,
             'bono'                => $gananciaPatrocinio,
             'residual'            => $puntosResiduales,
             'infinito'            => $puntosInfinito,
