@@ -21,6 +21,9 @@ use App\Services\Core\NetworkTreeService;
 
 class LoginController extends BaseController
 {
+    private const PASSWORD_RECOVERY_TYPE = 2;
+    private const PASSWORD_RECOVERY_TTL_MINUTES = 15;
+
     public function verifySponsor(Request $request)
     {
         $validator = Validator::make($request->all(), [
@@ -170,80 +173,95 @@ class LoginController extends BaseController
 
     }
 
-    public function validate(Request $request , string $uuid)
+    public function validate(Request $request, string $uuid)
     {
+        $validator = Validator::make($request->all(), [
+            'code' => 'required|digits:4',
+        ]);
+
+        if ($validator->fails()) {
+            return $this->sendError('Error de validacion.', $validator->errors(), 422);
+        }
+
         try {
-            $validator = Validator::make($request->all(), [
-                'code'     => 'required',
-            ]);
+            $verification = VerificationCodeUser::whereKey($uuid)
+                ->where('type', self::PASSWORD_RECOVERY_TYPE)
+                ->first();
 
-            $data = (object)$request->all();
-
-            if ($validator->fails()) return $this->sendError('Error de validacion.', $validator->errors(), 422);
-
-            $verificationCodeUser = VerificationCodeUser::find( $uuid );
-
-            if(  $verificationCodeUser == null ) return $this->sendResponse( [], "Error, El correo no está registrado. Intentar otra vez" , false);
-
-            if(  $verificationCodeUser->state == true ) return $this->sendResponse( [], "Error, El correo ya fue confirmado. Intentar otra vez" , false);
-
-            if(  $verificationCodeUser->code != $data->code ) return $this->sendResponse( [], "Error, El código es incorrecto" , false);
-
-            $message = "";
-            if( $verificationCodeUser->type == 2) {
-                $newPassword = $this->randomPassword();
-                User::where( "id" , $verificationCodeUser->user_id )->update(
-                    array("password" => bcrypt( $newPassword ) )
-                );
-
-                $userCurrent = User::find($verificationCodeUser->user_id);
-                $message = "Haz recuperado tu cuenta, revisa tu correo Tú nueva contraseña es: <br> <b>".$newPassword."</b>";
-
-                $mailData = [
-                    'url' => env('APP_URL_FRONT') . '/auth/login',
-                    'customer_name' => $userCurrent->name,
-                    'password' => $newPassword
-                ];
-
-                Mail::to( $userCurrent->email )->send(new PasswordUserMail($mailData));
-
-            }else{
-                $message = "Felicidades, su cuenta se ha creado con éxito. Continúe y bloguéate a tu cuenta.";
+            if ($verification === null) {
+                return $this->sendError('La solicitud de recuperacion no es valida.', [], 422);
+            }
+            if ($verification->state) {
+                return $this->sendError('Este codigo ya fue utilizado.', [], 422);
+            }
+            if ($verification->created_at->lt(now()->subMinutes(self::PASSWORD_RECOVERY_TTL_MINUTES))) {
+                $verification->update(['state' => true]);
+                return $this->sendError('El codigo ha expirado. Solicite uno nuevo.', [], 422);
+            }
+            if (!hash_equals((string) $verification->code, (string) $request->code)) {
+                return $this->sendError('El codigo es incorrecto.', [], 422);
             }
 
-            VerificationCodeUser::where("id" , $uuid )->update(
-                array( "state" => true )
-            );
+            $user = User::find($verification->user_id);
+            if ($user === null) {
+                $verification->update(['state' => true]);
+                return $this->sendError('La cuenta asociada ya no existe.', [], 422);
+            }
 
-            return $this->sendResponse( [] , $message );
+            $newPassword = Str::password(12);
+            DB::transaction(function () use ($user, $verification, $newPassword): void {
+                $user->update(['password' => bcrypt($newPassword)]);
+                $verification->update(['state' => true]);
+                DB::table('oauth_access_tokens')
+                    ->where('user_id', $user->id)
+                    ->update(['revoked' => true]);
+            });
 
-        }catch (Exception $e) {
-            return $this->sendError( $e->getMessage() );
+            Mail::to($user->email)->send(new PasswordUserMail([
+                'url' => env('APP_URL_FRONT') . '/auth/login',
+                'customer_name' => $user->name,
+                'password' => $newPassword,
+            ]));
+
+            return $this->sendResponse([], 'Cuenta recuperada. Revise su correo para obtener la nueva contrasena.');
+        } catch (Exception $e) {
+            return $this->sendError($e->getMessage());
         }
     }
 
     public function recover(Request $request )
     {
         try {
+            if (is_string($request->input('email'))) {
+                $request->merge(['email' => Str::lower(trim($request->string('email')->toString()))]);
+            }
+
             $validator = Validator::make($request->all(), [
                 'email'     => 'required|email',
             ]);
 
-            $data = (object)$request->all();
-
             if ($validator->fails()) return $this->sendError('Error de validacion.', $validator->errors(), 422);
 
-            $userCurrent = User::where( "email" , $request->email )->first();
+            $userCurrent = User::where('email', $request->email)->first();
 
-            if(  $userCurrent == null ) return $this->sendResponse( [], "Error, El correo no está registrado. Intentar otra vez" , false);
+            if ($userCurrent === null) {
+                return $this->sendResponse([], 'Si el correo esta registrado, recibira un codigo de recuperacion.');
+            }
 
             $codeGenerator = new CodeGenerator();
 
-            $validation = VerificationCodeUser::create([
-                'user_id' => $userCurrent->id,
-                'type'  => 2,
-                'code' => $codeGenerator->generate(),
-            ]);
+            $validation = DB::transaction(function () use ($userCurrent, $codeGenerator) {
+                VerificationCodeUser::where('user_id', $userCurrent->id)
+                    ->where('type', self::PASSWORD_RECOVERY_TYPE)
+                    ->where('state', false)
+                    ->update(['state' => true]);
+
+                return VerificationCodeUser::create([
+                    'user_id' => $userCurrent->id,
+                    'type' => self::PASSWORD_RECOVERY_TYPE,
+                    'code' => $codeGenerator->generate(),
+                ]);
+            });
 
             $mailData = [
                 'url' => env('APP_URL_FRONT') . '/auth/verification-code/'.$validation->id,
@@ -251,7 +269,7 @@ class LoginController extends BaseController
                 'code' => $validation->code
             ];
 
-            Mail::to($request->email)->send(new CreateUserMail($mailData));
+            Mail::to($userCurrent->email)->send(new CreateUserMail($mailData));
 
             $success['validation'] = $validation->id;
 
@@ -262,39 +280,4 @@ class LoginController extends BaseController
         }
     }
 
-    private function randomPassword() {
-        $alphabet = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ1234567890';
-        $pass = array(); //remember to declare $pass as an array
-        $alphaLength = strlen($alphabet) - 1; //put the length -1 in cache
-        for ($i = 0; $i < 8; $i++) {
-            $n = rand(0, $alphaLength);
-            $pass[] = $alphabet[$n];
-        }
-        return implode($pass); //turn the array into a string
-    }
-
-    public function resetPassword( Request $request )
-    {
-        try {
-
-            $validator = Validator::make($request->all(), [
-                'email'    => 'required|email',
-                'password' => 'required|min:6'
-            ]);
-
-            if ($validator->fails()) return $this->sendError('Error de validacion.', $validator->errors(), 422);
-
-            $userExists = User::where("email" , $request->email)->first();
-
-            if(  $userExists == null ) return $this->sendError( "Ese correo electronico no existe" );
-
-            User::where( "id" , $userExists->id )->update(
-                array("password" => bcrypt( $request->password ) )
-            );
-
-            return $this->sendResponse( 1 , 'User');
-        } catch (Exception $e) {
-            return $this->sendError( $e->getMessage() );
-        }
-    }
 }

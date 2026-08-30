@@ -832,6 +832,14 @@ class UserController extends BaseController
 
     public function modifyUser(Request $request)
     {
+        if (!Auth::user()?->is_admin) {
+            return $this->sendError('Solo un administrador puede modificar usuarios.', [], 403);
+        }
+
+        if (is_string($request->input('userEmail'))) {
+            $request->merge(['userEmail' => Str::lower(trim($request->string('userEmail')->toString()))]);
+        }
+
         $validator = Validator::make($request->all(), [
             'userCode'     => 'required',
             'userFullName' => 'required',
@@ -843,13 +851,15 @@ class UserController extends BaseController
         try {
             DB::beginTransaction();
 
-            if (!Auth::user()->is_admin) return $this->sendError("No tiene permisos.");
-
             $userUpdated = User::where("uuid", $request->userCode)->first();
-            if (!$userUpdated) return $this->sendError("Usuario no encontrado");
+            if (!$userUpdated) {
+                DB::rollBack();
+                return $this->sendError("Usuario no encontrado");
+            }
 
             if ($request->filled('userEmail')) {
-                $emailExists = User::where('email', $request->userEmail)
+                $newEmail = $request->userEmail;
+                $emailExists = User::where('email', $newEmail)
                     ->where('id', '!=', $userUpdated->id)
                     ->exists();
                 if ($emailExists) {
@@ -860,7 +870,7 @@ class UserController extends BaseController
 
             $userUpdated->update([
                 'name' => $request->userFullName,
-                'email' => $request->filled('userEmail') ? $request->userEmail : $userUpdated->email,
+                'email' => $request->filled('userEmail') ? $newEmail : $userUpdated->email,
             ]);
 
             // El patrocinador pertenece a la genealogia desde el registro y no
