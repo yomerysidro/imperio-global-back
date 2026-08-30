@@ -57,4 +57,15 @@ jobs:
           
           # 9. Reconstruir las caches de Laravel sin reiniciar Nginx.
           php artisan optimize:clear
+
+          # 10. Completar una sola vez los residuales historicos faltantes de
+          # agosto de 2026. El comando es idempotente y la marca evita volver
+          # a recorrer el periodo en los siguientes despliegues.
+          RESIDUAL_RECALC_MARKER="storage/app/.residuals-2026-08-recalculated"
+          if [ ! -f "$RESIDUAL_RECALC_MARKER" ]; then
+            php artisan residuals:recalculate 2026 8 --apply --no-interaction
+            touch "$RESIDUAL_RECALC_MARKER"
+          fi
+
+          # 11. Generar las caches finales con el codigo actualizado.
           php artisan optimize
