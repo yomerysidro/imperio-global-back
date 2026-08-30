@@ -11,7 +11,7 @@ class ReportExcelUsersTest extends TestCase
     {
         $export = new ReportExcelUsers([]);
 
-        $this->assertCount(16, $export->headings());
+        $this->assertCount(21, $export->headings());
         $this->assertSame('Bonos de Patrocinio', $export->headings()[5]);
         $this->assertSame('Bonos de Patrocinio Cobrados', $export->headings()[6]);
         $this->assertSame('Residual Producto (R)', $export->headings()[7]);
@@ -19,5 +19,10 @@ class ReportExcelUsersTest extends TestCase
         $this->assertSame('Bonos Residual Total', $export->headings()[9]);
         $this->assertSame('Bonos Totales', $export->headings()[10]);
         $this->assertSame('Gran Total', $export->headings()[14]);
+        $this->assertSame('Total Generado', $export->headings()[16]);
+        $this->assertSame('Pago Pendiente', $export->headings()[17]);
+        $this->assertSame('Total Cobrado', $export->headings()[18]);
+        $this->assertSame('Disponible por Cobrar', $export->headings()[19]);
+        $this->assertSame('Ultima Fecha de Cobro', $export->headings()[20]);
     }
 }

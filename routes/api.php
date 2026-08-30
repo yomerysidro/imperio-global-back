@@ -88,6 +88,7 @@ Route::prefix('v1')->group(function () {
             Route::prefix('request-patrocinio')->group(function () {
                 Route::get('find-all', [CollectionRequestPatrocinioUserController::class, 'findAll']);
                 Route::post('generate', [CollectionRequestPatrocinioUserController::class, 'generate']);
+                Route::get('balance', [CollectionRequestPatrocinioUserController::class, 'balance']);
                 Route::get('search', [CollectionRequestPatrocinioUserController::class, 'search']);
                 Route::post('approve', [CollectionRequestPatrocinioUserController::class, 'approve']);
                 Route::get('download', [CollectionRequestPatrocinioUserController::class, 'download']);

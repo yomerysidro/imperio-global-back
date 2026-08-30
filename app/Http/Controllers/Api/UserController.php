@@ -1000,13 +1000,12 @@ class UserController extends BaseController
             $userList = $userList->orderBy('created_at', 'desc')->get();
 
             foreach ($userList as $key => $user) {
-                $userList[$key]->payment = PaymentLog::with(['paymentOrder.pack'])->where("user_id",  $user->id)
-                    ->where(function ($query) {
-                        $query->where('state', PaymentLog::PAGADO)
-                            ->orWhere('state', PaymentLog::TERMINADO);
-                    })
-                    ->orderBy('created_at', 'desc')
-                    ->first();
+                $ownedPayment = $this->latestOwnedPackagePayment($user->id);
+                $userList[$key]->payment = $this->displayPaymentPayload(
+                    $ownedPayment,
+                    app(ActivationService::class)->isActive($user)
+                );
+                $userList[$key]->package_name = $user->package_name;
             }
 
             return $this->sendResponse($userList, 'Lista');
@@ -1503,19 +1502,9 @@ class UserController extends BaseController
 
     private function latestOwnedPackagePayment(int $userId)
     {
-        $manualReactivations = ManualReactivation::where('user_id', $userId)->get([
-            'payment_product_order_id', 'payment_log_ids',
-        ]);
-        $reactivationProductOrderIds = $manualReactivations
-            ->pluck('payment_product_order_id')->filter()->unique()->values();
-        $reactivationPaymentLogIds = $manualReactivations
-            ->pluck('payment_log_ids')->filter()->flatten()->filter()->unique()->values();
-
         $service = PaymentLog::with('paymentOrder.pack')
             ->where('user_id', $userId)
             ->whereIn('state', [PaymentLog::PAGADO, PaymentLog::TERMINADO, PaymentLog::RESET])
-            ->when($reactivationPaymentLogIds->isNotEmpty(), fn ($query) =>
-                $query->whereNotIn('id', $reactivationPaymentLogIds))
             ->latest('created_at')
             ->first();
         $product = PaymentProductOrder::with('pack')
@@ -1525,8 +1514,6 @@ class UserController extends BaseController
                 PaymentProductOrder::ENVIADO,
                 PaymentProductOrder::TERMINADO,
             ])
-            ->when($reactivationProductOrderIds->isNotEmpty(), fn ($query) =>
-                $query->whereNotIn('id', $reactivationProductOrderIds))
             ->latest('created_at')
             ->first();
 
@@ -1568,19 +1555,9 @@ class UserController extends BaseController
 
     private function ownedPacksByCategory(User $user, $activation): array
     {
-        $manualReactivations = ManualReactivation::where('user_id', $user->id)->get([
-            'payment_product_order_id', 'payment_log_ids',
-        ]);
-        $reactivationProductOrderIds = $manualReactivations
-            ->pluck('payment_product_order_id')->filter()->unique()->values();
-        $reactivationPaymentLogIds = $manualReactivations
-            ->pluck('payment_log_ids')->filter()->flatten()->filter()->unique()->values();
-
         $logs = PaymentLog::with('paymentOrder.pack')
             ->where('user_id', $user->id)
             ->whereIn('state', [PaymentLog::PAGADO, PaymentLog::TERMINADO, PaymentLog::RESET])
-            ->when($reactivationPaymentLogIds->isNotEmpty(), fn ($query) =>
-                $query->whereNotIn('id', $reactivationPaymentLogIds))
             ->latest('created_at')->get();
         $orders = PaymentProductOrder::with('pack')
             ->where('user_id', $user->id)
@@ -1589,8 +1566,6 @@ class UserController extends BaseController
                 PaymentProductOrder::ENVIADO,
                 PaymentProductOrder::TERMINADO,
             ])
-            ->when($reactivationProductOrderIds->isNotEmpty(), fn ($query) =>
-                $query->whereNotIn('id', $reactivationProductOrderIds))
             ->latest('created_at')->get();
 
         return collect([

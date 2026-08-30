@@ -3,6 +3,7 @@
 namespace App\Services\Core;
 
 use App\Models\PaymentOrderPoint;
+use App\Models\CollectionRequestPatrocinioUser;
 use App\Models\User;
 use Carbon\CarbonInterface;
 use Illuminate\Support\Collection;
@@ -63,8 +64,11 @@ class FinancialLedgerService
 
     public function summary(?CarbonInterface $from = null, ?CarbonInterface $to = null, ?string $userCode = null): array
     {
-        $rows = $this->movements($from, $to, $userCode);
-        $active = $rows;
+        return $this->summarizeMovements($this->movements($from, $to, $userCode));
+    }
+
+    public function summarizeMovements(Collection $active): array
+    {
         $sum = fn (Collection $items, array $types) => round((float) $items->whereIn('type', $types)->sum('point'), 2);
         $patrocinio = $sum($active, ['P', 'PS', 'S']);
         $residualProducto = $sum($active, ['R']);
@@ -87,6 +91,58 @@ class FinancialLedgerService
             'ganancia_total' => $bonoTotal,
             'movimientos_validos' => $active->count(),
             'movimientos_anulados' => 0,
+        ];
+    }
+
+    /**
+     * Calcula todos los saldos del reporte con una sola lectura del libro y
+     * una sola lectura de solicitudes, evitando consultas repetidas por usuario.
+     */
+    public function payoutSummaries(CarbonInterface $from, CarbonInterface $to, Collection $users): Collection
+    {
+        $movementsByUser = $this->movements($from, $to)
+            ->groupBy(fn (PaymentOrderPoint $row) => strtoupper((string) $row->user_code));
+        $requestsByUser = CollectionRequestPatrocinioUser::query()
+            ->whereIn('user_id', $users->pluck('id'))
+            ->whereDate('period', $from->copy()->startOfMonth()->toDateString())
+            ->get()
+            ->groupBy('user_id');
+
+        return $users->mapWithKeys(function (User $user) use ($movementsByUser, $requestsByUser) {
+            $commissions = $this->summarizeMovements(
+                $movementsByUser->get(strtoupper((string) $user->uuid), collect())
+            );
+            $generated = (float) $commissions['bono_total'];
+            $requests = $requestsByUser->get($user->id, collect());
+            $pending = (float) $requests->where('state', CollectionRequestPatrocinioUser::PENDING)->sum('amount');
+            $paidRequests = $requests->where('state', CollectionRequestPatrocinioUser::PAID);
+            $paid = (float) $paidRequests->sum('amount');
+
+            return [$user->id => [
+                'generated' => round($generated, 2),
+                'pending' => round($pending, 2),
+                'paid' => round($paid, 2),
+                'available' => round(max(0, $generated - $pending - $paid), 2),
+                'last_paid_at' => $paidRequests->max('paid_at'),
+                'commissions' => $commissions,
+            ]];
+        });
+    }
+
+    public function payoutSummary(CarbonInterface $from, CarbonInterface $to, User $user): array
+    {
+        $generated = (float) $this->summary($from, $to, $user->uuid)['bono_total'];
+        $requests = CollectionRequestPatrocinioUser::where('user_id', $user->id)
+            ->whereDate('period', $from->copy()->startOfMonth()->toDateString());
+        $pending = (float) (clone $requests)->where('state', CollectionRequestPatrocinioUser::PENDING)->sum('amount');
+        $paid = (float) (clone $requests)->where('state', CollectionRequestPatrocinioUser::PAID)->sum('amount');
+
+        return [
+            'generated' => round($generated, 2),
+            'pending' => round($pending, 2),
+            'paid' => round($paid, 2),
+            'available' => round(max(0, $generated - $pending - $paid), 2),
+            'last_paid_at' => (clone $requests)->where('state', CollectionRequestPatrocinioUser::PAID)->max('paid_at'),
         ];
     }
 }

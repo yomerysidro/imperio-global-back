@@ -127,6 +127,13 @@ class FinanceController extends BaseController
 
     private function generateExcelReportRealTime($date)
     {
+        // La exportacion procesa a todos los socios y genera un XLSX en la
+        // misma peticion. Se le da un margen propio sin alterar el limite
+        // general de la API.
+        if (function_exists('set_time_limit')) {
+            set_time_limit(180);
+        }
+
         $month = $date->format('m');
         $year  = $date->format('Y');
         $from  = $date->copy()->startOfMonth();
@@ -143,11 +150,13 @@ class FinanceController extends BaseController
             ->get();
         $ranges                    = Range::where("state", true)->orderBy('points', 'asc')->get();
         $ledger                    = app(FinancialLedgerService::class);
+        $payoutSummaries           = $ledger->payoutSummaries($from, $to, $userList);
 
         $excelBody = [];
         $global = ['personal' => 0.0, 'patrocinio' => 0.0, 'cobrado' => 0.0,
             'residual_producto' => 0.0, 'residual_servicio' => 0.0,
-            'residual' => 0.0, 'infinito' => 0.0, 'total' => 0.0];
+            'residual' => 0.0, 'infinito' => 0.0, 'total' => 0.0,
+            'pending' => 0.0, 'paid' => 0.0, 'available' => 0.0];
 
         foreach ($userList as $user) {
             $payment = PaymentLog::with(['paymentOrder.pack'])
@@ -172,7 +181,8 @@ class FinanceController extends BaseController
                 $paymentOrderPoints,
                 $paymentProductOrderPoints->where('user_id', $user->id)
             );
-            $commissions = $ledger->summary($from, $to, $user->uuid);
+            $payout = $payoutSummaries->get($user->id);
+            $commissions = $payout['commissions'];
 
             $totalPoints = $calculator->personal + $calculator->pointGroup;
 
@@ -188,6 +198,7 @@ class FinanceController extends BaseController
 
             $personalBonus = 0.0;
             $sponsorship = (float) $commissions['patrocinio'];
+            // Columna heredada: se conserva sin mezclar pagos de residual e infinito.
             $sponsorshipCollected = 0.0;
             $residual = (float) $commissions['residual'];
             $residualProducto = (float) $commissions['residualProducto'];
@@ -213,6 +224,9 @@ class FinanceController extends BaseController
             $global['residual_servicio'] += $residualServicio;
             $global['infinito'] += $infinity;
             $global['total'] += $payable;
+            $global['pending'] += $payout['pending'];
+            $global['paid'] += $payout['paid'];
+            $global['available'] += $payout['available'];
 
             $excelBody[] = [
                 $user->name,
@@ -230,7 +244,12 @@ class FinanceController extends BaseController
                 $personalPurchasePoints,
                 $infinity,
                 $payable,
-                $rangeCurrent?->title ?? "Sin rango"
+                $rangeCurrent?->title ?? "Sin rango",
+                $payout['generated'],
+                $payout['pending'],
+                $payout['paid'],
+                $payout['available'],
+                $payout['last_paid_at'],
             ];
         }
 
@@ -240,7 +259,9 @@ class FinanceController extends BaseController
             round($global['cobrado'], 2), round($global['residual_producto'], 2),
             round($global['residual_servicio'], 2), round($global['residual'], 2),
             round($global['total'], 2), '', '', round($global['infinito'], 2),
-            round($global['total'], 2), '',
+            round($global['total'], 2), '', round($global['total'], 2),
+            round($global['pending'], 2), round($global['paid'], 2),
+            round($global['available'], 2), '',
         ];
 
         $fecha        = Carbon::now()->format('YmdHis');

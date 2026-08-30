@@ -39,7 +39,12 @@ class ReportExcelUsers implements FromArray, WithHeadings, WithEvents
             'Puntos por compras personales',
             'Bono Infinito',
             'Gran Total',
-            'Rango'
+            'Rango',
+            'Total Generado',
+            'Pago Pendiente',
+            'Total Cobrado',
+            'Disponible por Cobrar',
+            'Ultima Fecha de Cobro',
         ];
     }
 
@@ -48,7 +53,7 @@ class ReportExcelUsers implements FromArray, WithHeadings, WithEvents
         return [
             AfterSheet::class => function(AfterSheet $event) {
                 // Aplica estilos a la cabecera (fila 1)
-                $event->sheet->getStyle('A1:P1')->applyFromArray([
+                $event->sheet->getStyle('A1:U1')->applyFromArray([
                     'font' => ['bold' => true, 'color' => ['rgb' => 'FFFFFF']],
                     'fill' => [
                         'fillType' => \PhpOffice\PhpSpreadsheet\Style\Fill::FILL_SOLID,
@@ -64,9 +69,9 @@ class ReportExcelUsers implements FromArray, WithHeadings, WithEvents
                 }
 
                 $lastRow = $event->sheet->getHighestRow();
-                $event->sheet->getStyle("A{$lastRow}:P{$lastRow}")->getFont()->setBold(true);
+                $event->sheet->getStyle("A{$lastRow}:U{$lastRow}")->getFont()->setBold(true);
 
-                foreach (range('A', 'P') as $col) {
+                foreach (range('A', 'U') as $col) {
                     $event->sheet->getDelegate()->getColumnDimension($col)->setAutoSize(true);
                 }
             }
