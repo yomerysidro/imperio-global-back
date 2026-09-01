@@ -22,7 +22,7 @@ class Calculator
      * Calcula todas las ganancias y volúmenes de un usuario
      * AHORA SOPORTA DATOS HISTÓRICOS (LEGACY) Y TRANSACCIONALES
      */
-    public function points(string $userCode, $paymentOrderPoints, $paymentProductOrderPoints, $month = null, $year = null): object
+    public function points(string $userCode, $paymentOrderPoints, $paymentProductOrderPoints, $month = null, $year = null, bool $includeClosed = false): object
     {
         $userModel = User::where('uuid', $userCode)->first();
         if (!$userModel) {
@@ -56,7 +56,8 @@ class Calculator
         // =========================================================
         foreach ($paymentProductOrderPoints as $productOrder) {
             $fecha = Carbon::parse($productOrder->created_at);
-            if ($fecha->month == $targetMonth && $fecha->year == $targetYear && (int) $productOrder->state === 1) {
+            if ($fecha->month == $targetMonth && $fecha->year == $targetYear
+                && ($includeClosed || (int) $productOrder->state === 1)) {
                 $puntosProducto += (float) ($productOrder->points ?? 0);
             }
         }
@@ -66,7 +67,7 @@ class Calculator
         // =========================================================
         foreach ($paymentOrderPoints as $orderPoint) {
             // Validar estado
-            if (!(bool) $orderPoint->state) continue;
+            if (!$includeClosed && !(bool) $orderPoint->state) continue;
 
             // 🔥 VERIFICAR SI ES UN REGISTRO LEGACY (histórico)
             $isLegacy = isset($orderPoint->is_legacy) && $orderPoint->is_legacy === true;
@@ -234,9 +235,9 @@ class Calculator
     /**
      * Calcula el total de puntos de un usuario
      */
-    public function pointsTotal(string $userCode, $paymentOrderPoints, $paymentProductOrderPoints, $month = null, $year = null): float
+    public function pointsTotal(string $userCode, $paymentOrderPoints, $paymentProductOrderPoints, $month = null, $year = null, bool $includeClosed = false): float
     {
-        $result = $this->points($userCode, $paymentOrderPoints, $paymentProductOrderPoints, $month, $year);
+        $result = $this->points($userCode, $paymentOrderPoints, $paymentProductOrderPoints, $month, $year, $includeClosed);
         return (float) $result->pointGroup + (float) $result->personal;
     }
 
