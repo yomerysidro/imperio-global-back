@@ -8,6 +8,7 @@ use App\Models\PaymentLog;
 use App\Models\PaymentProductOrder;
 use App\Models\User;
 use Carbon\CarbonInterface;
+use Carbon\Carbon;
 use Illuminate\Support\Facades\DB;
 
 class ActivationService
@@ -21,14 +22,45 @@ class ActivationService
         if (ManualReactivation::where('user_id', $user->id)
             ->where('period', now()->startOfMonth()->toDateString())
             ->where('state', ManualReactivation::ACTIVE)->exists()) return true;
-        return $this->isActiveForPeriod($user, now()->startOfMonth(), now()->endOfMonth(), false);
+        $now = Carbon::now('America/Lima');
+        if ($this->isActiveForPeriod($user, $now->copy()->startOfMonth(), $now->copy()->endOfMonth(), false)) return true;
+
+        if ($this->isMonthlyGracePeriod($now)) {
+            $previous = $now->copy()->subMonthNoOverflow();
+            return $this->isActiveForPeriod($user, $previous->copy()->startOfMonth(), $previous->copy()->endOfMonth(), true);
+        }
+
+        return false;
     }
 
     public function isActiveForCategory(User $user, string $category): bool
     {
-        return $this->isActiveForCategoryPeriod(
-            $user, $category, now()->startOfMonth(), now()->endOfMonth(), false
-        );
+        $now = Carbon::now('America/Lima');
+        if ($this->isActiveForCategoryPeriod(
+            $user, $category, $now->copy()->startOfMonth(), $now->copy()->endOfMonth(), false
+        )) return true;
+
+        if ($this->isMonthlyGracePeriod($now)) {
+            $previous = $now->copy()->subMonthNoOverflow();
+            return $this->isActiveForCategoryPeriod(
+                $user, $category, $previous->copy()->startOfMonth(), $previous->copy()->endOfMonth(), true
+            );
+        }
+
+        return false;
+    }
+
+    public function isMonthlyGracePeriod(?CarbonInterface $date = null): bool
+    {
+        $now = $date ? Carbon::instance($date)->timezone('America/Lima') : Carbon::now('America/Lima');
+        return $now->lt($now->copy()->startOfMonth()->addDays(2)->setTime(1, 0));
+    }
+
+    public function visiblePeriod(?CarbonInterface $date = null): array
+    {
+        $now = $date ? Carbon::instance($date)->timezone('America/Lima') : Carbon::now('America/Lima');
+        $period = $this->isMonthlyGracePeriod($now) ? $now->copy()->subMonthNoOverflow() : $now;
+        return [$period->copy()->startOfMonth(), $period->copy()->endOfMonth()];
     }
 
     public function isActiveForCategoryPeriod(

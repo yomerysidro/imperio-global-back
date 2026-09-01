@@ -36,11 +36,15 @@ class PaymentOrderPointController extends BaseController
     public function points(Request $request)
     {
         try {
-            $now = Carbon::now();
+            $now = Carbon::now('America/Lima');
+            $activation = app(\App\Services\Core\ActivationService::class);
+            $usingGracePeriod = !$request->has('month') && !$request->has('year')
+                && $activation->isMonthlyGracePeriod($now);
+            $defaultPeriod = $usingGracePeriod ? $now->copy()->subMonthNoOverflow() : $now;
 
             // Tomar los parámetros del request, o usar el mes actual por defecto
-            $month = $request->query('month', $now->month);
-            $year = $request->query('year', $now->year);
+            $month = $request->query('month', $defaultPeriod->month);
+            $year = $request->query('year', $defaultPeriod->year);
 
             // Validación básica de parámetros
             if (!is_numeric($month) || $month < 1 || $month > 12) {
@@ -55,7 +59,7 @@ class PaymentOrderPointController extends BaseController
                     'paymentOrder.paymentLog', 
                     'userPoint.paymentActive'
                 ])
-                ->where('state', true)
+                ->when(!$usingGracePeriod, fn ($query) => $query->where('state', true))
                 ->whereMonth('created_at', $month)
                 ->whereYear('created_at', $year)
                 ->orderBy('created_at', 'desc')
@@ -82,11 +86,12 @@ class PaymentOrderPointController extends BaseController
             if (!$userModel) return $this->sendError("Usuario no encontrado");
 
             // --- LÓGICA DE TIEMPO Y PERIODO DE GRACIA ---
-            $now = Carbon::now();
+            $now = Carbon::now('America/Lima');
             $currentMonth = $now->month;
             $currentYear = $now->year;
             $mesAnterior = $now->copy()->subMonth();
-            $isGracePeriod = $now->day <= 2;
+            $activation = app(\App\Services\Core\ActivationService::class);
+            $isGracePeriod = $activation->isMonthlyGracePeriod($now);
 
             $servicePayment = PaymentLog::with(['paymentOrder.pack'])
                 ->where("user_id", $user_id)->whereIn('state', [PaymentLog::PAGADO, 6])->orderBy('created_at', 'desc')->first();
@@ -110,9 +115,9 @@ class PaymentOrderPointController extends BaseController
                     $estadoVisual = 'ACTIVO';
                 } elseif ($fechaPago->month == $mesAnterior->month && $fechaPago->year == $mesAnterior->year) {
                     if ($isGracePeriod) {
-                        // Periodo de gracia: puede pagar, pero está INACTIVO
-                        $isActive = false;
-                        $estadoVisual = 'INACTIVO';
+                        // El ciclo anterior conserva su actividad durante la gracia.
+                        $isActive = true;
+                        $estadoVisual = 'ACTIVO';
                         $mesFiltro = $mesAnterior->month;
                         $anioFiltro = $mesAnterior->year;
                     }
@@ -120,7 +125,7 @@ class PaymentOrderPointController extends BaseController
             }
 
             // Sincronizar estado en BD para consistencia
-            if ($ultimoPago) {
+            if ($ultimoPago && !$isGracePeriod) {
                 $nuevoEstado = $isActive ? PaymentLog::PAGADO : PaymentLog::TERMINADO;
 
                 if ($ultimoPago instanceof PaymentLog) {
@@ -177,9 +182,11 @@ class PaymentOrderPointController extends BaseController
             }
 
             // OBTENEMOS LOS PUNTOS ESTRICTAMENTE DEL MES DE EVALUACIÓN
-            $allPointsTable = PaymentOrderPoint::where('state', true)
+            $allPointsTable = PaymentOrderPoint::query()
+                ->when(!$isGracePeriod, fn ($query) => $query->where('state', true))
                 ->whereMonth('created_at', $mesFiltro)->whereYear('created_at', $anioFiltro)->get();
-            $allProductPoints = PaymentProductOrderPoint::where('state', true)
+            $allProductPoints = PaymentProductOrderPoint::query()
+                ->when(!$isGracePeriod, fn ($query) => $query->where('state', true))
                 ->whereMonth('created_at', $mesFiltro)->whereYear('created_at', $anioFiltro)->get();
 
             // COMISIONES HISTÓRICAS ACUMULADAS (Patrocinio + Residual de TODOS los meses)
@@ -198,24 +205,28 @@ class PaymentOrderPointController extends BaseController
             $combinedPoints = $allPointsTable->merge($historicalCommissions);
 
             // TRANSFORMACIÓN DE NODOS
-            $networkPoints->transform(function ($item) use ($allPointsTable, $allProductPoints, $currentMonth, $currentYear) {
+            $networkPoints->transform(function ($item) use ($allPointsTable, $allProductPoints, $activation) {
                 $item->user = $item->userPoint;
 
                 // Verificar si está activo en el ciclo actual
-                $hasBoughtThisCycle = PaymentOrderPoint::where('user_code', $item->user_code)
-                    ->where('type', PaymentOrderPoint::COMPRA)
-                    ->where('payment', 1)
-                    ->where('state', true)
-                    ->whereMonth('created_at', $currentMonth)
-                    ->whereYear('created_at', $currentYear)
-                    ->exists();
+                $hasBoughtThisCycle = $item->userPoint
+                    ? $activation->isActive($item->userPoint)
+                    : false;
 
                 $item->active = $hasBoughtThisCycle;
                 $item->state = $hasBoughtThisCycle ? PaymentLog::PAGADO : PaymentLog::TERMINADO;
 
                 if ($item->userPoint) {
-                    $item->points = $this->calculator->points($item->user_code, $allPointsTable, $allProductPoints);
-                    $item->totalPoints = $this->calculator->pointsTotal($item->user_code, $allPointsTable, $allProductPoints);
+                    [$from] = $activation->visiblePeriod();
+                    $includeClosed = $activation->isMonthlyGracePeriod();
+                    $item->points = $this->calculator->points(
+                        $item->user_code, $allPointsTable, $allProductPoints,
+                        $from->month, $from->year, $includeClosed
+                    );
+                    $item->totalPoints = $this->calculator->pointsTotal(
+                        $item->user_code, $allPointsTable, $allProductPoints,
+                        $from->month, $from->year, $includeClosed
+                    );
                 }
                 return $item;
             });
@@ -263,8 +274,14 @@ class PaymentOrderPointController extends BaseController
                 ];
                 $userModel->totalPoints = 0;
             } else {
-                $userModel->points = $this->calculator->points($userModel->uuid, $combinedPoints, $allProductPoints);
-                $userModel->totalPoints = $this->calculator->pointsTotal($userModel->uuid, $combinedPoints, $allProductPoints);
+                $userModel->points = $this->calculator->points(
+                    $userModel->uuid, $combinedPoints, $allProductPoints,
+                    $mesFiltro, $anioFiltro, $isGracePeriod
+                );
+                $userModel->totalPoints = $this->calculator->pointsTotal(
+                    $userModel->uuid, $combinedPoints, $allProductPoints,
+                    $mesFiltro, $anioFiltro, $isGracePeriod
+                );
             }
 
             return $this->sendResponse(["points" => $networkPoints, "user" => $userModel], 'Éxito');

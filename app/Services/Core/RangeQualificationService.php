@@ -26,7 +26,11 @@ class RangeQualificationService
         $rules = RangeRule::with(['range', 'requirements.requiredRange'])
             ->where('state', true)->get()->sortBy('range.order')->values();
         $users = User::where('is_admin', false)->get();
-        $groupPoints = PaymentOrderPoint::whereIn('type', [PaymentOrderPoint::COMPRA, PaymentOrderPoint::GRUPAL])->where('state', true)
+        [$from, $to] = app(ActivationService::class)->visiblePeriod();
+        $isGracePeriod = app(ActivationService::class)->isMonthlyGracePeriod();
+        $groupPoints = PaymentOrderPoint::whereIn('type', [PaymentOrderPoint::COMPRA, PaymentOrderPoint::GRUPAL])
+            ->when(!$isGracePeriod, fn ($query) => $query->where('state', true))
+            ->whereBetween('created_at', [$from, $to])
             ->selectRaw('user_code, SUM(point) total')->groupBy('user_code')->pluck('total', 'user_code');
         foreach ($users as $user) $this->activeCache[strtoupper($user->uuid)] = $user->active;
         RangeUser::where('status', true)->update(['status' => false]);
@@ -48,9 +52,12 @@ class RangeQualificationService
     {
         ActivationService::clearCache();
         $this->activeCache[strtoupper($user->uuid)] = $user->active;
+        [$from, $to] = app(ActivationService::class)->visiblePeriod();
+        $isGracePeriod = app(ActivationService::class)->isMonthlyGracePeriod();
         $points = (float) PaymentOrderPoint::where('user_code', $user->uuid)
             ->whereIn('type', [PaymentOrderPoint::COMPRA, PaymentOrderPoint::GRUPAL])
-            ->where('state', true)->sum('point');
+            ->when(!$isGracePeriod, fn ($query) => $query->where('state', true))
+            ->whereBetween('created_at', [$from, $to])->sum('point');
         $qualifiedRule = null;
         foreach (RangeRule::with(['range', 'requirements.requiredRange'])
             ->where('state', true)->get()->sortBy('range.order') as $rule) {

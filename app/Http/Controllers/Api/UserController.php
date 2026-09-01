@@ -67,16 +67,16 @@ class UserController extends BaseController
                 return $this->sendError("Usuario no encontrado.");
             }
 
-            $now           = Carbon::now();
+            $now           = Carbon::now('America/Lima');
             $currentMonth  = $now->month;
             $currentYear   = $now->year;
             $mesAnterior   = $now->copy()->subMonth();
-            $isGracePeriod = $now->day <= 2;
+            $isGracePeriod = app(\App\Services\Core\ActivationService::class)->isMonthlyGracePeriod($now);
 
             $servicePayment = PaymentLog::with(['paymentOrder.pack'])
-                ->where("user_id", $user->id)->whereIn('state', [PaymentLog::PAGADO])->orderBy('created_at', 'desc')->first();
+                ->where("user_id", $user->id)->whereIn('state', [PaymentLog::PAGADO, PaymentLog::TERMINADO])->orderBy('created_at', 'desc')->first();
             $productPayment = PaymentProductOrder::with(['pack'])
-                ->where("user_id", $user->id)->whereIn('state', [PaymentProductOrder::PAGADO, PaymentProductOrder::ENVIADO])->orderBy('created_at', 'desc')->first();
+                ->where("user_id", $user->id)->whereIn('state', [PaymentProductOrder::PAGADO, PaymentProductOrder::ENVIADO, PaymentProductOrder::TERMINADO])->orderBy('created_at', 'desc')->first();
 
             $ultimoPago = collect([$servicePayment, $productPayment])->filter()->sortByDesc('created_at')->first();
             $displayPayment = $this->latestOwnedPackagePayment($user->id);
@@ -106,14 +106,15 @@ class UserController extends BaseController
             // =========================================================
             // 🔥 CÁLCULO DE PUNTOS (EXACTO AL DE auth())
             // =========================================================
-            $paymentOrderPoints = PaymentOrderPoint::where('state', 1)
+            $paymentOrderPoints = PaymentOrderPoint::query()
+                ->when(!$isGracePeriod, fn ($query) => $query->where('state', 1))
                 ->whereMonth('created_at', $mesFiltro)
                 ->whereYear('created_at', $anioFiltro)
                 ->whereIn('type', ['B', 'G', 'R', 'RS', 'P', 'PS', 'S', 'I'])
                 ->get();
 
             $paymentProductOrderPoints = PaymentProductOrderPoint::where("user_id", $user->id)
-                ->where("state", true)
+                ->when(!$isGracePeriod, fn ($query) => $query->where("state", true))
                 ->whereMonth('created_at', $mesFiltro)
                 ->whereYear('created_at', $anioFiltro)
                 ->get();
@@ -261,16 +262,16 @@ class UserController extends BaseController
 
         if (!$userModel) return $this->sendError("Usuario no encontrado");
 
-        $now           = Carbon::now();
+        $now           = Carbon::now('America/Lima');
         $currentMonth  = $now->month;
         $currentYear   = $now->year;
         $mesAnterior   = $now->copy()->subMonth();
-        $isGracePeriod = $now->day <= 2;
+        $isGracePeriod = app(\App\Services\Core\ActivationService::class)->isMonthlyGracePeriod($now);
 
         $servicePayment = PaymentLog::with(['paymentOrder.pack'])
-            ->where("user_id", $user_id)->whereIn('state', [PaymentLog::PAGADO])->orderBy('created_at', 'desc')->first();
+            ->where("user_id", $user_id)->whereIn('state', [PaymentLog::PAGADO, PaymentLog::TERMINADO])->orderBy('created_at', 'desc')->first();
         $productPayment = PaymentProductOrder::with(['pack', 'details.product'])
-            ->where("user_id", $user_id)->whereIn('state', [PaymentProductOrder::PAGADO, PaymentProductOrder::ENVIADO])->orderBy('created_at', 'desc')->first();
+            ->where("user_id", $user_id)->whereIn('state', [PaymentProductOrder::PAGADO, PaymentProductOrder::ENVIADO, PaymentProductOrder::TERMINADO])->orderBy('created_at', 'desc')->first();
 
         $ultimoPago = collect([$servicePayment, $productPayment])->filter()->sortByDesc('created_at')->first();
         $displayPayment = $this->latestOwnedPackagePayment($user_id);
@@ -331,7 +332,8 @@ class UserController extends BaseController
 
         // 🔥 CORRECCIÓN 1: OBTENER TODOS LOS PUNTOS ACTIVOS (state = 1) DEL MES FILTRADO
         // Incluimos todos los tipos: B, G, R, P, S, I
-        $paymentOrderPoints = PaymentOrderPoint::where('state', 1) // 👈 state = 1 (activo)
+        $paymentOrderPoints = PaymentOrderPoint::query()
+            ->when(!$isGracePeriod, fn ($query) => $query->where('state', 1))
             ->whereMonth('created_at', $mesFiltro)
             ->whereYear('created_at', $anioFiltro)
             ->whereIn('type', ['B', 'G', 'R', 'RS', 'P', 'PS', 'S', 'I']) // TODOS LOS TIPOS
@@ -684,11 +686,11 @@ class UserController extends BaseController
 
         $userList = $userList->orderBy('created_at', 'desc')->paginate($limit);
 
-        $now = Carbon::now();
+        $now = Carbon::now('America/Lima');
         $currentMonth = $now->month;
         $currentYear = $now->year;
         $mesAnterior = $now->copy()->subMonth();
-        $isGracePeriod = $now->day <= 2;
+        $isGracePeriod = app(\App\Services\Core\ActivationService::class)->isMonthlyGracePeriod($now);
 
         // 🔥 Obtener TODOS los puntos activos del mes
         $allPaymentOrderPoints = PaymentOrderPoint::with(['paymentOrder.pack'])
@@ -702,11 +704,10 @@ class UserController extends BaseController
 
         // 🔥 Puntos del mes anterior (período de gracia)
         $allPaymentOrderPointsLastMonth = PaymentOrderPoint::with(['paymentOrder.pack'])
-            ->where('state', 1)
             ->whereMonth('created_at', $mesAnterior->month)->whereYear('created_at', $mesAnterior->year)
             ->get();
 
-        $allProductOrderPointsLastMonth = PaymentProductOrderPoint::where("state", true)
+        $allProductOrderPointsLastMonth = PaymentProductOrderPoint::query()
             ->whereMonth('created_at', $mesAnterior->month)->whereYear('created_at', $mesAnterior->year)
             ->get();
 
@@ -730,9 +731,9 @@ class UserController extends BaseController
 
         foreach ($userList as $key => $user) {
             $servicePayment = PaymentLog::with(['paymentOrder.pack', 'paymentOrder.sponsor.file'])
-                ->where("user_id", $user->id)->whereIn('state', [PaymentLog::PAGADO])->orderBy('created_at', 'desc')->first();
+                ->where("user_id", $user->id)->whereIn('state', [PaymentLog::PAGADO, PaymentLog::TERMINADO])->orderBy('created_at', 'desc')->first();
             $productPayment = PaymentProductOrder::with(['pack'])
-                ->where("user_id", $user->id)->whereIn('state', [PaymentProductOrder::PAGADO, PaymentProductOrder::ENVIADO])->orderBy('created_at', 'desc')->first();
+                ->where("user_id", $user->id)->whereIn('state', [PaymentProductOrder::PAGADO, PaymentProductOrder::ENVIADO, PaymentProductOrder::TERMINADO])->orderBy('created_at', 'desc')->first();
 
             $ultimoPago = collect([$servicePayment, $productPayment])->filter()->sortByDesc('created_at')->first();
             $displayPayment = $this->latestOwnedPackagePayment($user->id);
