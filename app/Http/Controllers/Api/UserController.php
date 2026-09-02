@@ -330,6 +330,15 @@ class UserController extends BaseController
         $userModel->package_name = $userModel->package_name;
         $userModel->active       = $isActive;
 
+        // La cuenta corporativa debe mostrar el mismo ciclo visible que el
+        // resto del sistema. Durante la gracia ese ciclo es el mes anterior,
+        // incluso si DOSB tiene un registro administrativo del mes actual.
+        if ($userModel->is_admin || strcasecmp((string) $userModel->uuid, 'DOSB') === 0) {
+            [$visibleFrom] = app(\App\Services\Core\ActivationService::class)->visiblePeriod($now);
+            $mesFiltro = $visibleFrom->month;
+            $anioFiltro = $visibleFrom->year;
+        }
+
         // 🔥 CORRECCIÓN 1: OBTENER TODOS LOS PUNTOS ACTIVOS (state = 1) DEL MES FILTRADO
         // Incluimos todos los tipos: B, G, R, P, S, I
         $paymentOrderPoints = PaymentOrderPoint::query()
@@ -412,7 +421,7 @@ class UserController extends BaseController
             $monthlyGroupVolume = DB::query()->fromSub(
                 PaymentOrderPoint::select('payment_order_id', DB::raw('MAX(point) as point'))
                     ->whereIn('user_code', $descendantCodes)
-                    ->where('state', true)
+                    ->when(!$isGracePeriod, fn ($query) => $query->where('state', true))
                     ->where('type', PaymentOrderPoint::COMPRA)
                     ->whereMonth('created_at', $mesFiltro)
                     ->whereYear('created_at', $anioFiltro)
