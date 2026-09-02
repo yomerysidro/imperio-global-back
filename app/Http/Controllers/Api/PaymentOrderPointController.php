@@ -38,8 +38,15 @@ class PaymentOrderPointController extends BaseController
         try {
             $now = Carbon::now('America/Lima');
             $activation = app(\App\Services\Core\ActivationService::class);
-            $usingGracePeriod = !$request->has('month') && !$request->has('year')
-                && $activation->isMonthlyGracePeriod($now);
+            $isGracePeriod = $activation->isMonthlyGracePeriod($now);
+            $requestedCurrentPeriod = (int) $request->query('month', $now->month) === $now->month
+                && (int) $request->query('year', $now->year) === $now->year;
+            // El frontend envía el mes calendario actual aun durante la
+            // gracia. En esos dos días esa selección representa el ciclo
+            // visible anterior, no el mes nuevo todavía vacío.
+            $usingGracePeriod = $isGracePeriod && (
+                (!$request->has('month') && !$request->has('year')) || $requestedCurrentPeriod
+            );
             $defaultPeriod = $usingGracePeriod ? $now->copy()->subMonthNoOverflow() : $now;
 
             // Tomar los parámetros del request, o usar el mes actual por defecto
@@ -52,6 +59,10 @@ class PaymentOrderPointController extends BaseController
             }
             if (!is_numeric($year) || $year < 2000) {
                 $year = $now->year;
+            }
+            if ($usingGracePeriod) {
+                $month = $defaultPeriod->month;
+                $year = $defaultPeriod->year;
             }
 
             // --- OBTENER TODOS LOS PUNTOS DEL MES FILTRADO (SIN DATOS HISTÓRICOS) ---

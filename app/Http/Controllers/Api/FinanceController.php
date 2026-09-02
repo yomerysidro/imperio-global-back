@@ -363,13 +363,20 @@ class FinanceController extends BaseController
     public function cashFlowFilter(Request $request)
     {
         try {
-            [$visibleFrom] = app(ActivationService::class)->visiblePeriod(Carbon::now('America/Lima'));
+            $now = Carbon::now('America/Lima');
+            $activation = app(ActivationService::class);
+            [$visibleFrom] = $activation->visiblePeriod($now);
 
             $year  = $visibleFrom->format('Y');
             $month = $visibleFrom->format('m');
 
             if ($request->has('month') && !empty($request->query('month'))) $month = $request->query('month');
             if ($request->has('year') && !empty($request->query('year'))) $year    = $request->query('year');
+            if ($activation->isMonthlyGracePeriod($now)
+                && (int) $month === $now->month && (int) $year === $now->year) {
+                $month = $visibleFrom->month;
+                $year = $visibleFrom->year;
+            }
 
             $paymentOrders = PaymentLog::with(['paymentOrder'])
                 ->whereRaw('MONTH(created_at) = ?', [$month])
@@ -1232,14 +1239,21 @@ class FinanceController extends BaseController
         // Sin filtros explícitos, Finanzas sigue el ciclo visible general:
         // durante la gracia conserva el cierre del mes anterior. Una consulta
         // histórica con month/year continúa respetando el período solicitado.
-        [$visibleFrom] = app(ActivationService::class)->visiblePeriod(Carbon::now('America/Lima'));
+        $now = Carbon::now('America/Lima');
+        $activation = app(ActivationService::class);
+        [$visibleFrom] = $activation->visiblePeriod($now);
         $month = (int) $request->query('month', $visibleFrom->month);
         $year = (int) $request->query('year', $visibleFrom->year);
+        if ($activation->isMonthlyGracePeriod($now)
+            && $month === $now->month && $year === $now->year) {
+            $month = $visibleFrom->month;
+            $year = $visibleFrom->year;
+        }
         $from = Carbon::create($year, $month, 1)->startOfMonth();
         $to = $from->copy()->endOfMonth();
         $ledger = app(FinancialLedgerService::class);
-        $isVisibleClosedPeriod = !$request->has('month') && !$request->has('year')
-            && app(ActivationService::class)->isMonthlyGracePeriod(Carbon::now('America/Lima'));
+        $isVisibleClosedPeriod = $activation->isMonthlyGracePeriod($now)
+            && $month === $visibleFrom->month && $year === $visibleFrom->year;
         $summary = $ledger->summary(
             $from,
             $to,
