@@ -10,11 +10,16 @@ use Illuminate\Support\Collection;
 
 class FinancialLedgerService
 {
-    public function movements(?CarbonInterface $from = null, ?CarbonInterface $to = null, ?string $userCode = null): Collection
+    public function movements(
+        ?CarbonInterface $from = null,
+        ?CarbonInterface $to = null,
+        ?string $userCode = null,
+        bool $includeClosed = false
+    ): Collection
     {
         $query = PaymentOrderPoint::query()
             ->whereIn('type', ['P', 'PS', 'S', 'R', 'RS', 'I'])
-            ->where('state', true)
+            ->when(!$includeClosed, fn ($query) => $query->where('state', true))
             ->where('point', '>', 0);
         if ($from && $to) $query->whereBetween('created_at', [$from, $to]);
         if ($userCode) $query->whereRaw('UPPER(user_code) = ?', [strtoupper($userCode)]);
@@ -68,9 +73,14 @@ class FinancialLedgerService
         ]);
     }
 
-    public function summary(?CarbonInterface $from = null, ?CarbonInterface $to = null, ?string $userCode = null): array
+    public function summary(
+        ?CarbonInterface $from = null,
+        ?CarbonInterface $to = null,
+        ?string $userCode = null,
+        bool $includeClosed = false
+    ): array
     {
-        return $this->summarizeMovements($this->movements($from, $to, $userCode));
+        return $this->summarizeMovements($this->movements($from, $to, $userCode, $includeClosed));
     }
 
     public function summarizeMovements(Collection $active): array
@@ -104,9 +114,14 @@ class FinancialLedgerService
      * Calcula todos los saldos del reporte con una sola lectura del libro y
      * una sola lectura de solicitudes, evitando consultas repetidas por usuario.
      */
-    public function payoutSummaries(CarbonInterface $from, CarbonInterface $to, Collection $users): Collection
+    public function payoutSummaries(
+        CarbonInterface $from,
+        CarbonInterface $to,
+        Collection $users,
+        bool $includeClosed = false
+    ): Collection
     {
-        $movementsByUser = $this->movements($from, $to)
+        $movementsByUser = $this->movements($from, $to, null, $includeClosed)
             ->groupBy(fn (PaymentOrderPoint $row) => strtoupper((string) $row->user_code));
         $requestsByUser = CollectionRequestPatrocinioUser::query()
             ->whereIn('user_id', $users->pluck('id'))

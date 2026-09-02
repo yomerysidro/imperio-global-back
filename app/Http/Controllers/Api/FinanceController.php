@@ -153,7 +153,9 @@ class FinanceController extends BaseController
             ->get();
         $ranges                    = Range::where("state", true)->orderBy('points', 'asc')->get();
         $ledger                    = app(FinancialLedgerService::class);
-        $payoutSummaries           = $ledger->payoutSummaries($from, $to, $userList);
+        // El reporte de un ciclo ya cerrado conserva sus ganancias aunque el
+        // cierre haya desactivado los asientos para iniciar el mes siguiente.
+        $payoutSummaries           = $ledger->payoutSummaries($from, $to, $userList, !$isCurrentPeriod);
 
         $excelBody = [];
         $global = ['personal' => 0.0, 'patrocinio' => 0.0, 'cobrado' => 0.0,
@@ -1236,7 +1238,14 @@ class FinanceController extends BaseController
         $from = Carbon::create($year, $month, 1)->startOfMonth();
         $to = $from->copy()->endOfMonth();
         $ledger = app(FinancialLedgerService::class);
-        $summary = $ledger->summary($from, $to, $request->query('user_code'));
+        $isVisibleClosedPeriod = !$request->has('month') && !$request->has('year')
+            && app(ActivationService::class)->isMonthlyGracePeriod(Carbon::now('America/Lima'));
+        $summary = $ledger->summary(
+            $from,
+            $to,
+            $request->query('user_code'),
+            $isVisibleClosedPeriod
+        );
         $summary['period'] = ['month' => $month, 'year' => $year];
         $summary['formula'] = 'bono_total = patrocinio + residual + infinito';
 

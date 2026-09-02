@@ -371,7 +371,8 @@ class UserController extends BaseController
             $companyCommissions = app(FinancialLedgerService::class)->summary(
                 Carbon::create($anioFiltro, $mesFiltro, 1)->startOfMonth(),
                 Carbon::create($anioFiltro, $mesFiltro, 1)->endOfMonth(),
-                $userModel->uuid
+                $userModel->uuid,
+                $isGracePeriod
             );
             $gananciaPatrocinio = (float) $companyCommissions['patrocinio'];
             $residualProducto = (float) $companyCommissions['residualProducto'];
