@@ -138,15 +138,18 @@ class FinanceController extends BaseController
         $year  = $date->format('Y');
         $from  = $date->copy()->startOfMonth();
         $to    = $date->copy()->endOfMonth();
+        $isCurrentPeriod = $from->format('Y-m') === Carbon::now('America/Lima')->format('Y-m');
 
         $userList = User::orderBy('is_admin')->orderBy('name')->get();
         $paymentOrderPoints = PaymentOrderPoint::whereMonth('created_at', $month)
             ->whereYear('created_at', $year)
-            ->where('state', true)
+            // El cierre desactiva B/G, pero el Excel del ciclo cerrado debe
+            // conservar ese volumen. En el mes abierto sí se excluyen bajas.
+            ->when($isCurrentPeriod, fn ($query) => $query->where('state', true))
             ->get();
         $paymentProductOrderPoints = PaymentProductOrderPoint::whereMonth('created_at', $month)
             ->whereYear('created_at', $year)
-            ->where('state', true)
+            ->when($isCurrentPeriod, fn ($query) => $query->where('state', true))
             ->get();
         $ranges                    = Range::where("state", true)->orderBy('points', 'asc')->get();
         $ledger                    = app(FinancialLedgerService::class);
@@ -358,16 +361,26 @@ class FinanceController extends BaseController
     public function cashFlowFilter(Request $request)
     {
         try {
-            $fechaActual = Carbon::now();
+            [$visibleFrom] = app(ActivationService::class)->visiblePeriod(Carbon::now('America/Lima'));
 
-            $year  = $fechaActual->format('Y');
-            $month = $fechaActual->format('m');
+            $year  = $visibleFrom->format('Y');
+            $month = $visibleFrom->format('m');
 
             if ($request->has('month') && !empty($request->query('month'))) $month = $request->query('month');
             if ($request->has('year') && !empty($request->query('year'))) $year    = $request->query('year');
 
-            $paymentOrders        = PaymentLog::with(['paymentOrder'])->whereRaw('MONTH(created_at) = ?', [$month])->whereRaw('YEAR(created_at) = ?', [$year])->where("state", PaymentLog::PAGADO)->get();
-            $paymentProductOrders = PaymentProductOrder::whereRaw('MONTH(created_at) = ?', [$month])->whereRaw('YEAR(created_at) = ?', [$year])->where("state", PaymentProductOrder::PAGADO)->get();
+            $paymentOrders = PaymentLog::with(['paymentOrder'])
+                ->whereRaw('MONTH(created_at) = ?', [$month])
+                ->whereRaw('YEAR(created_at) = ?', [$year])
+                ->whereIn('state', [PaymentLog::PAGADO, PaymentLog::TERMINADO])
+                ->get();
+            $paymentProductOrders = PaymentProductOrder::whereRaw('MONTH(created_at) = ?', [$month])
+                ->whereRaw('YEAR(created_at) = ?', [$year])
+                ->whereIn('state', [
+                    PaymentProductOrder::PAGADO,
+                    PaymentProductOrder::ENVIADO,
+                    PaymentProductOrder::TERMINADO,
+                ])->get();
 
             return $this->sendResponse([
                 "orders"   => $paymentOrders,
@@ -391,7 +404,12 @@ class FinanceController extends BaseController
 
             $paymentProductOrderList = PaymentProductOrder::with(['fileImage' => function ($query) {
                 $query->select('id', 'path');
-            }])->select('id', 'file', 'user_id', 'state', 'created_at', DB::raw('0 as plan'), 'pack_id', 'phone', 'points', 'discount', DB::raw("'' as payment_order_id"))->whereIn("state", [PaymentProductOrder::PAGADO, PaymentProductOrder::ENVIADO, PaymentProductOrder::PREORDER]);
+            }])->select('id', 'file', 'user_id', 'state', 'created_at', DB::raw('0 as plan'), 'pack_id', 'phone', 'points', 'discount', DB::raw("'' as payment_order_id"))->whereIn("state", [
+                PaymentProductOrder::PAGADO,
+                PaymentProductOrder::ENVIADO,
+                PaymentProductOrder::PREORDER,
+                PaymentProductOrder::TERMINADO,
+            ]);
             
             $userNameCurrentIds          = [];
             if ($userCodeCurrent != null) {
@@ -1209,8 +1227,12 @@ class FinanceController extends BaseController
         ]);
         if ($validator->fails()) return $this->sendError('Error de validacion.', $validator->errors(), 422);
 
-        $month = (int) $request->query('month', now()->month);
-        $year = (int) $request->query('year', now()->year);
+        // Sin filtros explícitos, Finanzas sigue el ciclo visible general:
+        // durante la gracia conserva el cierre del mes anterior. Una consulta
+        // histórica con month/year continúa respetando el período solicitado.
+        [$visibleFrom] = app(ActivationService::class)->visiblePeriod(Carbon::now('America/Lima'));
+        $month = (int) $request->query('month', $visibleFrom->month);
+        $year = (int) $request->query('year', $visibleFrom->year);
         $from = Carbon::create($year, $month, 1)->startOfMonth();
         $to = $from->copy()->endOfMonth();
         $ledger = app(FinancialLedgerService::class);
@@ -1627,23 +1649,16 @@ class FinanceController extends BaseController
             $directosLegacy = collect($directCodes)->map(fn ($code) => (object) ['guest_user_code' => $code]);
             $totalDirectos = count($directCodes);
 
-            $now     = Carbon::now();
+            $now = Carbon::now('America/Lima');
+            $activation = app(ActivationService::class);
+            [$visibleFrom, $visibleTo] = $activation->visiblePeriod($now);
+            $isGracePeriod = $activation->isMonthlyGracePeriod($now);
             $activos = 0;
             foreach ($directosLegacy as $guest) {
                 $user = User::where('uuid', $guest->guest_user_code)->first();
-                if ($user) {
-                    $hasPayment = PaymentLog::where('user_id', $user->id)
-                        ->whereIn('state', [2, 6])
-                        ->whereMonth('created_at', $now->month)
-                        ->whereYear('created_at', $now->year)
-                        ->exists();
-                    $hasProduct = PaymentProductOrder::where('user_id', $user->id)
-                        ->whereIn('state', [PaymentProductOrder::PAGADO, PaymentProductOrder::ENVIADO, PaymentProductOrder::TERMINADO])
-                        ->whereMonth('created_at', $now->month)
-                        ->whereYear('created_at', $now->year)
-                        ->exists();
-                    if ($hasPayment || $hasProduct) $activos++;
-                }
+                if ($user && $activation->isActiveForPeriod(
+                    $user, $visibleFrom, $visibleTo, $isGracePeriod
+                )) $activos++;
             }
 
             // Usando el servicio inyectado
@@ -1663,8 +1678,8 @@ class FinanceController extends BaseController
                 PaymentOrderPoint::select('payment_order_id', DB::raw('MAX(point) as point'))
                     ->whereIn('user_code', $descendantCodes)
                     ->where('type', PaymentOrderPoint::COMPRA)
-                    ->whereMonth('created_at', now()->month)
-                    ->whereYear('created_at', now()->year)
+                    ->when(!$isGracePeriod, fn ($query) => $query->where('state', true))
+                    ->whereBetween('created_at', [$visibleFrom, $visibleTo])
                     ->groupBy('payment_order_id'),
                 'monthly_network_purchases'
             )->sum('point');
