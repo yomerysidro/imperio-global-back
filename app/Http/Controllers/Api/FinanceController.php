@@ -854,11 +854,8 @@ class FinanceController extends BaseController
                 DB::rollBack();
                 return $this->sendError('Uno o mas productos seleccionados no existen.', [], 422);
             }
-            $eligibleProductIds = ProductPointPack::where('pack_id', $pack->id)
-                ->whereIn('product_id', $productIds)->pluck('product_id')->all();
             $categoryProductIds = $productList->where('reactivation_category', $category)->pluck('id')->all();
-            if (count(array_unique($eligibleProductIds)) !== count(array_unique($productIds))
-                || count(array_unique($categoryProductIds)) !== count(array_unique($productIds))) {
+            if (count(array_unique($categoryProductIds)) !== count(array_unique($productIds))) {
                 DB::rollBack();
                 return $this->sendError('Uno o mas productos no pertenecen a la categoria de reactivacion seleccionada.', [], 422);
             }
@@ -1357,10 +1354,9 @@ class FinanceController extends BaseController
         }
         $packId = $pack?->id;
         $discount = (float) ($pack->discount ?? 0);
-        $eligibleIds = ProductPointPack::where('pack_id', $packId)->pluck('product_id');
         $products = Product::with('file_image')->where('state', true)
             ->where('reactivation_category', $category)
-            ->whereIn('id', $eligibleIds)->orderBy('title')->get()
+            ->orderBy('title')->get()
             ->map(function (Product $product) use ($packId, $category, $discount) {
                 $product->effective_points = $this->effectiveProductPoints($product, $packId, $category);
                 $product->points = $product->effective_points;
@@ -1391,26 +1387,7 @@ class FinanceController extends BaseController
 
     private function effectiveProductPoints(Product $product, ?string $packId, string $category): float
     {
-        $specific = $packId ? ProductPointPack::where('product_id', $product->id)
-            ->where('pack_id', $packId)
-            ->where('point', '>', 0)
-            ->value('point') : null;
-
-        // El respaldo solo puede salir de packs de la misma categoria. De este
-        // modo un servicio nunca hereda los puntos de un pack de productos.
-        $packCategory = $category === ReactivationRule::SERVICE ? 'Servicio' : 'Producto';
-        $configured = ProductPointPack::where('product_id', $product->id)
-            ->where('point', '>', 0)
-            ->whereHas('pack', fn ($query) => $query->where('category', $packCategory))
-            ->max('point');
-
-        // En servicios, la regla activa define dinamicamente los puntos de la
-        // reactivacion cuando no existe una asignacion positiva producto-pack.
-        $fallback = $category === ReactivationRule::SERVICE
-            ? ReactivationRule::where('category', $category)->where('state', true)->value('minimum_points')
-            : $product->points;
-
-        return (float) ($specific ?? $configured ?? $fallback ?? 0);
+        return (float) ($product->points ?? 0);
     }
 
     private function reactivationEligibility(User $user, string $category): array
