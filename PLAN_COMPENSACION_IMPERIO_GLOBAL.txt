@@ -1,0 +1,324 @@
+PLAN DE COMPENSACION Y REQUISITOS DE RANGOS
+IMPERIO GLOBAL
+
+Documento funcional con los requisitos del cambio
+==================================================
+
+1. ACTIVACION Y REACTIVACION
+----------------------------
+
+1.1. Formas de activación:
+
+  a) Activación de 200 puntos, S/350 y 4 productos.
+
+  b) Activación de 50 puntos y S/100, sin exigir una cantidad determinada de
+     productos.
+
+1.2. Las dos modalidades de activación permiten generar y cobrar comisiones,
+siempre que el socio se encuentre activo.
+
+1.3. Para calificar y mantener un rango se exige la condición especial de
+actividad de 200 puntos indicada en los requisitos de cada rango.
+
+1.4. Se mantienen los mínimos de reactivación mensual:
+
+  - Productos: 50 puntos.
+  - Servicios: 30 puntos.
+
+1.5. La reactivación de productos y la reactivación de servicios deben seguir
+siendo independientes.
+
+
+2. RESIDUAL BASE: NIVELES 1 AL 7
+--------------------------------
+
+2.1. Todos los socios activos cobran hasta siete niveles de profundidad,
+tengan o no tengan rango.
+
+2.2. Bronce, Plata, Oro, Jade u otro rango no son requisitos para cobrar los
+primeros siete niveles.
+
+2.3. Los porcentajes del residual base son:
+
+  - Nivel 1: 12.50 %
+  - Nivel 2: 12.50 %
+  - Nivel 3: 16.00 %
+  - Nivel 4: 13.00 %
+  - Nivel 5:  6.00 %
+  - Nivel 6:  2.50 %
+  - Nivel 7:  1.00 %
+
+2.4. Estos son los porcentajes que deben configurarse en ig_residual_points.
+
+
+3. RECORRIDO DE LA RED, ACTIVIDAD Y NIVELES
+-------------------------------------------
+
+3.1. Cada patrocinador ocupa y conserva su nivel genealógico real.
+
+3.2. Los usuarios inactivos intermedios no bloquean ni detienen el recorrido
+hacia los patrocinadores superiores.
+
+3.3. No existe compresión de niveles.
+
+Ejemplo:
+
+  - El patrocinador del nivel 1 está inactivo: no cobra.
+  - El patrocinador del nivel 2 está inactivo: no cobra.
+  - El patrocinador del nivel 3 está activo: cobra el 16 % del nivel 3.
+
+El patrocinador del nivel 3 no sube al nivel 1 y tampoco pierde su comisión por
+la inactividad de las personas que se encuentran debajo de él.
+
+3.4. La actividad se evalúa individualmente para cada beneficiario.
+
+3.5. La inactividad de un socio solamente impide que ese socio cobre su propia
+comisión; no perjudica a los demás patrocinadores activos de la línea.
+
+
+4. BONO DEL 1 % AL INFINITO
+---------------------------
+
+4.1. Todo socio activo que todavía no tenga rango Jade cobra el 1 % desde el
+nivel 8 en adelante, al infinito.
+
+4.2. Cuando un socio alcanza y mantiene Jade o un rango superior, los niveles
+correspondientes a su generación pagan el porcentaje especial del rango.
+
+4.3. Al terminar la última generación abierta por su rango, continúa cobrando
+el 1 % al infinito desde el nivel siguiente.
+
+4.4. En los niveles cubiertos por una generación, el porcentaje generacional
+reemplaza al 1 %; no se suman ambos porcentajes sobre el mismo nivel.
+
+Ejemplos:
+
+  - Socio sin Jade: niveles 1 al 7 según la tabla base y 1 % desde el nivel 8
+    en adelante.
+
+  - Socio Jade: niveles 1 al 7 según la tabla base; 3 % en los niveles 8, 9 y
+    10; y 1 % desde el nivel 11 en adelante.
+
+  - Socio Rubí: niveles 1 al 7 según la tabla base; 3 % en los niveles 8 al 10;
+    3 % en los niveles 11 al 13; y 1 % desde el nivel 14 en adelante.
+
+4.5. Si el socio deja de cumplir el rango que abre una generación, deja de
+cobrar el porcentaje especial de esa generación mientras no recupere el rango.
+Mantiene los niveles 1 al 7 si está activo y cobra el 1 % al infinito desde el
+nivel 8 bajo la regla general.
+
+
+5. REQUISITOS Y BENEFICIOS POR RANGO
+------------------------------------
+
+5.1. BRONCE
+
+Requisitos:
+
+  - Estar activo con 200 puntos.
+  - Tener 1,000 puntos de volumen.
+
+Beneficios:
+
+  - Niveles 1 al 7 con los porcentajes del residual base.
+  - 1 % al infinito desde el nivel 8.
+
+
+5.2. PLATA
+
+Requisitos:
+
+  - Estar activo con 200 puntos.
+  - Tener 3,000 puntos de volumen.
+  - Tener 2 líneas directas activas.
+  - Tener 2 socios con rango Bronce, uno en cada línea distinta.
+  - La posición de los Bronce dentro de cada línea no importa.
+
+Beneficios:
+
+  - Niveles 1 al 7 con los porcentajes del residual base.
+  - 1 % al infinito desde el nivel 8.
+
+
+5.3. ORO
+
+Requisitos:
+
+  - Estar activo con 200 puntos.
+  - Tener 8,000 puntos de volumen.
+  - Tener 3 líneas directas activas.
+  - Tener 2 rangos Plata.
+  - Tener 2 rangos Bronce en una tercera línea.
+
+Beneficios:
+
+  - Niveles 1 al 7 con los porcentajes del residual base.
+  - 1 % al infinito desde el nivel 8.
+
+
+5.4. JADE - PRIMERA GENERACION
+
+Requisitos:
+
+  - Estar activo con 200 puntos.
+  - Tener 28,000 puntos de volumen.
+  - Tener 4 líneas directas activas.
+  - Tener 2 rangos Plata, uno en cada línea distinta.
+  - Tener 1 rango Oro en otra línea.
+  - Tener 4 rangos Bronce.
+
+Beneficios:
+
+  - Niveles 1 al 7 con los porcentajes del residual base.
+  - Abre la primera generación: niveles 8 al 10.
+  - Paga 3 % en cada uno de los niveles 8, 9 y 10.
+  - Desde el nivel 11 en adelante paga 1 % al infinito.
+
+
+5.5. RUBI - SEGUNDA GENERACION
+
+Requisitos:
+
+  - Estar activo con 200 puntos.
+  - Tener 78,000 puntos de volumen.
+  - Tener 4 líneas directas activas.
+  - Tener 3 rangos Oro, uno en cada línea distinta.
+  - Tener 1 rango Jade en otra línea.
+  - Tener 3 rangos Plata.
+  - Tener 6 rangos Bronce.
+
+Beneficios:
+
+  - Conserva la primera generación Jade: niveles 8 al 10 al 3 %.
+  - Abre la segunda generación: niveles 11 al 13.
+  - Paga 3 % en cada uno de los niveles 11, 12 y 13.
+  - Desde el nivel 14 en adelante paga 1 % al infinito.
+
+
+5.6. DIAMANTE - TERCERA GENERACION
+
+Requisitos:
+
+  - Estar activo con 200 puntos.
+  - Tener 120,000 puntos de volumen.
+  - Tener 5 líneas directas activas.
+  - Tener 1 rango Rubí en una línea.
+  - Tener 2 rangos Jade en otra línea.
+  - Tener 3 rangos Oro en otra línea.
+  - Tener 4 rangos Plata en otra línea.
+  - Tener 8 rangos Bronce en otra línea.
+
+Beneficios:
+
+  - Conserva las generaciones anteriores.
+  - Abre la tercera generación: niveles 14 al 16.
+  - Paga 3 % en cada uno de los niveles 14, 15 y 16.
+  - Desde el nivel 17 en adelante paga 1 % al infinito.
+
+
+5.7. DOBLE DIAMANTE - CUARTA GENERACION
+
+Requisitos:
+
+  - Estar activo con 200 puntos.
+  - Tener 320,000 puntos de volumen.
+  - Tener 7 líneas directas activas.
+  - Tener 1 rango Diamante en una línea.
+  - Tener 1 rango Rubí en otra línea.
+  - Tener 2 rangos Jade.
+  - Tener 4 rangos Oro.
+  - Tener 6 rangos Plata.
+  - Tener 10 rangos Bronce.
+
+Beneficios:
+
+  - Conserva las generaciones anteriores.
+  - Abre la cuarta generación: niveles 17 al 19.
+  - Paga 2 % en cada uno de los niveles 17, 18 y 19.
+  - Desde el nivel 20 en adelante paga 1 % al infinito.
+
+
+5.8. TRIPLE DIAMANTE - QUINTA GENERACION
+
+Requisitos:
+
+  - Estar activo con 200 puntos.
+  - Tener 600,000 puntos de volumen.
+  - Tener 8 líneas directas activas.
+  - Tener 2 rangos Diamante.
+  - Tener 2 rangos Rubí.
+  - Tener 3 rangos Jade.
+  - Tener 5 rangos Oro.
+  - Tener 7 rangos Plata.
+  - Tener 15 rangos Bronce.
+  - Los rangos deberán estar distribuidos en líneas diferentes según la regla
+    comercial aprobada.
+
+Beneficios:
+
+  - Conserva las generaciones anteriores.
+  - Abre la quinta generación: niveles 20 al 22.
+  - Paga 1 % en cada uno de los niveles 20, 21 y 22.
+  - Desde el nivel 23 en adelante paga 1 % al infinito.
+
+
+5.9. IMPERIO GLOBAL - SEXTA GENERACION
+
+Requisitos:
+
+  - Estar activo con 200 puntos.
+  - Tener 1,600,000 puntos de volumen.
+  - Tener 8 líneas directas activas.
+  - Tener 1 rango Triple Diamante en una línea.
+  - Tener 1 rango Doble Diamante en otra línea.
+  - Tener 1 rango Diamante en otra línea.
+  - Tener 2 rangos Rubí en otra línea.
+  - Tener 2 rangos Jade en otra línea.
+  - Tener 4 rangos Oro en otra línea.
+  - Tener 8 rangos Plata en otra línea.
+  - Tener 25 rangos Bronce.
+
+Beneficios:
+
+  - Conserva las generaciones anteriores.
+  - Abre la sexta generación: niveles 23 al 26.
+  - Paga 1 % en cada uno de los niveles 23, 24, 25 y 26.
+  - Desde el nivel 27 en adelante paga 1 % al infinito.
+
+
+6. RESUMEN DE PORCENTAJES POR PROFUNDIDAD
+-----------------------------------------
+
+  - Nivel 1:       12.50 % para todo socio activo.
+  - Nivel 2:       12.50 % para todo socio activo.
+  - Nivel 3:       16.00 % para todo socio activo.
+  - Nivel 4:       13.00 % para todo socio activo.
+  - Nivel 5:        6.00 % para todo socio activo.
+  - Nivel 6:        2.50 % para todo socio activo.
+  - Nivel 7:        1.00 % para todo socio activo.
+  - Niveles 8-10:   3.00 % con Jade vigente; sin Jade, 1 % al infinito.
+  - Niveles 11-13:  3.00 % con Rubí vigente; sin Rubí, 1 % al infinito.
+  - Niveles 14-16:  3.00 % con Diamante vigente; sin Diamante, 1 % al infinito.
+  - Niveles 17-19:  2.00 % con Doble Diamante vigente; sin ese rango, 1 %.
+  - Niveles 20-22:  1.00 % con Triple Diamante vigente; en caso contrario, 1 %.
+  - Niveles 23-26:  1.00 % con Imperio Global vigente; en caso contrario, 1 %.
+  - Nivel 27+:      1.00 % al infinito.
+
+
+7. DATOS QUE DEBEN CONFIRMARSE ANTES DE PROGRAMAR
+-------------------------------------------------
+
+7.1. Confirmar cómo deben distribuirse por líneas distintas los rangos exigidos
+para Diamante, Doble Diamante, Triple Diamante e Imperio Global.
+
+7.2. Este documento interpreta que el porcentaje especial de una generación
+reemplaza al 1 % infinito dentro de esos niveles y que no se suman. Esta regla
+debe quedar aprobada expresamente antes de programar.
+
+
+LEMA
+----
+
+Para lograr el éxito es enfoque, acción y educación.
+
+IMPERIO GLOBAL

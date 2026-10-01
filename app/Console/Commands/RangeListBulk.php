@@ -9,14 +9,14 @@ use Illuminate\Console\Command;
 class RangeListBulk extends Command
 {
     protected $signature = 'app:range-list-bulk';
-    protected $description = 'Recalcula rangos e infinito usando exclusivamente reglas configuradas en BD';
+    protected $description = 'Recalcula rangos usando exclusivamente reglas configuradas en BD';
 
     public function handle(): int
     {
         $log = ScheduleCron::create(['signature' => $this->signature]);
         try {
             $engine = app(RangeQualificationService::class);
-            $result = ['range' => $engine->recalculateAll(), 'infinito' => $engine->distributeInfinity()];
+            $result = ['range' => $engine->recalculateAll(), 'infinito' => []];
             $log->update(['response' => json_encode($result), 'status' => 2]);
             return self::SUCCESS;
         } catch (\Throwable $exception) {

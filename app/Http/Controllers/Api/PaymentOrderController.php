@@ -331,6 +331,7 @@ class PaymentOrderController extends BaseController
                             "token" => $dataBody->token,
                         )
                     );
+                    app(\App\Services\Core\FinanceIGService::class)->registerSale($uuid);
                 }
             }
 

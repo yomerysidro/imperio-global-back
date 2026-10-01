@@ -9,6 +9,7 @@ use App\Models\Range;
 use App\Models\RangeRequirement;
 use App\Models\RangeRule;
 use App\Models\ReactivationRule;
+use App\Models\SponsorshipPoint;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
@@ -18,11 +19,19 @@ class MlmRuleController extends BaseController
 {
     public function index()
     {
+        $sponsorshipByPack = SponsorshipPoint::all()->keyBy('pack_id');
+        $commissionRules = CommissionRule::with('minimumRange')->orderBy('bonus_type')->orderBy('level')->get();
+        foreach ($commissionRules as $rule) {
+            if ($rule->bonus_type === CommissionRule::SPONSORSHIP && $rule->pack_id) {
+                $config = $sponsorshipByPack->get($rule->pack_id);
+                if ($config) $rule->percentage = $config->percentageForLevel((int) $rule->level);
+            }
+        }
         return $this->sendResponse([
             'activation_rules' => ActivationRule::orderBy('id')->get(),
             'reactivation_rules' => ReactivationRule::orderBy('id')->get(),
             'ranges' => Range::with(['rule.requirements.requiredRange'])->orderBy('order')->get(),
-            'commission_rules' => CommissionRule::with('minimumRange')->orderBy('bonus_type')->orderBy('level')->get(),
+            'commission_rules' => $commissionRules,
         ], 'Configuracion MLM');
     }
 
@@ -52,6 +61,7 @@ class MlmRuleController extends BaseController
             'range_rules.*.requirements.*.required_range_id' => 'required|exists:ranges,id',
             'range_rules.*.requirements.*.required_count' => 'required|integer|min:1',
             'range_rules.*.requirements.*.minimum_distinct_lines' => 'required|integer|min:1',
+            'range_rules.*.requirements.*.exclusive_line_group' => 'sometimes|boolean',
             'commission_rules' => 'sometimes|array',
             'commission_rules.*.bonus_type' => 'required_with:commission_rules|in:sponsorship,residual',
             'commission_rules.*.category' => 'nullable|in:product,service',
@@ -78,15 +88,37 @@ class MlmRuleController extends BaseController
                 $rule = RangeRule::updateOrCreate(['range_id' => $item['range_id']], $item);
                 Range::whereKey($rule->range_id)->update(['points' => $rule->required_points, 'childs' => $rule->required_active_lines]);
                 if ($requirements !== null) {
+                    $lineGroups = RangeRequirement::where('range_id', $rule->range_id)
+                        ->pluck('exclusive_line_group', 'required_range_id');
                     RangeRequirement::where('range_id', $rule->range_id)->delete();
                     foreach ($requirements as $requirement) {
+                        $requirement['exclusive_line_group'] = $requirement['exclusive_line_group']
+                            ?? (bool) ($lineGroups[$requirement['required_range_id']] ?? false);
                         RangeRequirement::create($requirement + ['range_id' => $rule->range_id]);
                     }
                 }
             }
             foreach ($request->input('commission_rules', []) as $item) {
+                if ($item['bonus_type'] === CommissionRule::SPONSORSHIP
+                    && !empty($item['pack_id']) && (int) $item['level'] >= 1 && (int) $item['level'] <= 5) {
+                    SponsorshipPoint::where('pack_id', $item['pack_id'])
+                        ->update(['level'.$item['level'] => $item['percentage']]);
+                }
                 if ($item['bonus_type'] === CommissionRule::RESIDUAL && empty($item['category'])) {
                     $item['category'] = ReactivationRule::PRODUCT;
+                }
+                if ($item['bonus_type'] === CommissionRule::RESIDUAL && (int) $item['level'] <= 7) {
+                    \App\Models\ResidualPoint::query()->whereKey(1)->update([
+                        'level'.$item['level'] => $item['percentage'],
+                    ]);
+                    foreach ([ReactivationRule::PRODUCT, ReactivationRule::SERVICE] as $category) {
+                        CommissionRule::updateOrCreate([
+                            'bonus_type' => CommissionRule::RESIDUAL,
+                            'category' => $category, 'pack_id' => null,
+                            'level' => $item['level'],
+                        ], ['percentage' => $item['percentage'], 'minimum_range_id' => null, 'state' => true]);
+                    }
+                    continue;
                 }
                 CommissionRule::updateOrCreate([
                     'bonus_type' => $item['bonus_type'], 'category' => $item['category'] ?? null,

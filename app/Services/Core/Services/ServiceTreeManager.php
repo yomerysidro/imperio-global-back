@@ -3,7 +3,7 @@
 namespace App\Services\Core\Services;
 
 use App\Models\PaymentOrderPoint;
-use App\Models\CommissionRule;
+use App\Models\SponsorshipPoint;
 use App\Models\RangeRule;
 use App\Models\User;
 use App\Services\Core\NetworkTreeService;
@@ -62,9 +62,8 @@ class ServiceTreeManager
 
     private function calculateServicePoints($totalPoints, $level, $packId)
     {
-        $config = CommissionRule::where('bonus_type', CommissionRule::SPONSORSHIP)
-            ->where('pack_id', $packId)->where('level', $level)->where('state', true)->first();
-        $percent = (float) ($config?->percentage ?? 0);
+        $config = SponsorshipPoint::where('pack_id', $packId)->first();
+        $percent = $config?->percentageForLevel($level) ?? 0.0;
 
         return (float) $totalPoints * $percent / 100;
     }

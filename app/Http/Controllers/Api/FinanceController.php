@@ -195,7 +195,8 @@ class FinanceController extends BaseController
             $directs = count($this->networkTreeService->directUserCodes($user->uuid));
 
             foreach ($ranges->sortByDesc('points') as $range) {
-                if ($range->points <= $totalPoints && $range->childs <= $directs) {
+                if ($range->points <= $totalPoints
+                    && (strcasecmp((string) $user->uuid, 'DOSB') === 0 || $range->childs <= $directs)) {
                     $rangeCurrent    = $range;
                     break;
                 }
@@ -952,11 +953,15 @@ class FinanceController extends BaseController
             }
 
             PaymentProductOrderDetail::insert($productListCreate);
+            app(\App\Services\Core\FinanceIGService::class)->captureOrderPricing($paymentProductOrder->id);
             foreach ($productList as $product) {
                 $keyDetail = array_search($product->id, array_column($dataBody->products, 'product'));
                 $quantity = (int) ((object) $dataBody->products[$keyDetail])->quantity;
                 $product->decrement('stock', $quantity);
             }
+
+            app(\App\Services\Core\FinanceIGService::class)
+                ->registerSale($paymentProductOrder->id, [], [], true);
 
             $productOrderPoint = PaymentProductOrderPoint::create([
                 'payment_product_order_id' => $paymentProductOrder->id,
@@ -1157,6 +1162,8 @@ class FinanceController extends BaseController
                 ->get(['product_id', 'quantity'])->each(function (PaymentProductOrderDetail $detail) {
                     Product::whereKey($detail->product_id)->increment('stock', (int) $detail->quantity);
                 });
+            app(\App\Services\Core\FinanceIGService::class)
+                ->registerCancellation($reactivation->payment_product_order_id, true);
             PaymentProductOrderDetail::where('payment_product_order_id', $reactivation->payment_product_order_id)
                 ->update(['price' => 0, 'subtotal' => 0]);
             PaymentLog::whereIn('id', $reactivation->payment_log_ids ?? [])->update(['state' => PaymentLog::RESET]);

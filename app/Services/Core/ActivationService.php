@@ -63,6 +63,59 @@ class ActivationService
         return [$period->copy()->startOfMonth(), $period->copy()->endOfMonth()];
     }
 
+    /** La modalidad de mayor puntaje es el requisito mensual de rango. */
+    public function hasRankActivity(User $user): bool
+    {
+        if ($user->is_admin || strcasecmp((string) $user->uuid, 'DOSB') === 0) return true;
+        if (!$this->isActive($user)) return false;
+
+        $rule = ActivationRule::where('state', true)->orderByDesc('minimum_points')->first();
+        if (!$rule) return false;
+        [$from, $to] = $this->visiblePeriod();
+        $closed = $this->isMonthlyGracePeriod();
+        $logStates = $closed ? [PaymentLog::PAGADO, PaymentLog::TERMINADO] : [PaymentLog::PAGADO];
+        $orderStates = $closed
+            ? [PaymentProductOrder::PAGADO, PaymentProductOrder::ENVIADO, PaymentProductOrder::TERMINADO]
+            : [PaymentProductOrder::PAGADO, PaymentProductOrder::ENVIADO];
+        $prefix = DB::getTablePrefix();
+
+        $packs = DB::table('payment_logs as logs')
+            ->join('payment_orders as orders', 'orders.id', '=', 'logs.payment_order_id')
+            ->join('packs', 'packs.id', '=', 'orders.pack_id')
+            ->where('logs.user_id', $user->id)->whereIn('logs.state', $logStates)
+            ->whereBetween('logs.created_at', [$from, $to])
+            ->selectRaw("{$prefix}packs.category, SUM({$prefix}packs.points) points, SUM(CASE WHEN {$prefix}orders.amount > 0 THEN {$prefix}orders.amount ELSE {$prefix}packs.price END) amount")
+            ->groupBy('packs.category')->get();
+        $packsByCategory = $packs->keyBy(fn ($pack) => strtolower((string) $pack->category));
+
+        $orders = PaymentProductOrder::with('pack')->where('user_id', $user->id)
+            ->whereIn('state', $orderStates)->whereBetween('created_at', [$from, $to])
+            ->get()->groupBy(fn ($order) => strtolower((string) ($order->pack?->category ?? '')));
+        $productOrders = $orders->get('producto', collect());
+        $productPack = $packsByCategory->get('producto');
+        $productCount = (int) DB::table('payment_product_order_details as details')
+            ->join('payment_product_orders as orders', 'orders.id', '=', 'details.payment_product_order_id')
+            ->join('packs', 'packs.id', '=', 'orders.pack_id')
+            ->where('orders.user_id', $user->id)->whereIn('orders.state', $orderStates)
+            ->whereBetween('orders.created_at', [$from, $to])
+            ->whereRaw("LOWER({$prefix}packs.category) = ?", ['producto'])->sum('details.quantity');
+        $productPackQualifies = (float) ($productPack->points ?? 0) >= $rule->minimum_points
+            && (float) ($productPack->amount ?? 0) >= $rule->minimum_amount;
+        $productQualifies = ((float) ($productPack->points ?? 0) + $productOrders->sum('points'))
+                >= $rule->minimum_points
+            && ((float) ($productPack->amount ?? 0) + $productOrders->sum('amount'))
+                >= $rule->minimum_amount
+            && ($productPackQualifies || $productCount >= $rule->minimum_products);
+        $serviceOrders = $orders->get('servicio', collect());
+        $servicePack = $packsByCategory->get('servicio');
+        $serviceQualifies = ((float) ($servicePack->points ?? 0) + $serviceOrders->sum('points'))
+                >= $rule->minimum_points
+            && ((float) ($servicePack->amount ?? 0) + $serviceOrders->sum('amount'))
+                >= $rule->minimum_amount;
+
+        return $productQualifies || $serviceQualifies;
+    }
+
     public function isActiveForCategoryPeriod(
         User $user,
         string $category,

@@ -207,12 +207,17 @@ class PaymentProductOrderController extends BaseController
 
             // AUTOMATIZACIÓN DE PUNTOS: Si el nuevo estado es PAGADO (2), disparamos la red
             if ($dataBody->state == 2) {
+                app(\App\Services\Core\FinanceIGService::class)->registerSale($paymentProductOrder->id);
                 $user = User::find($paymentProductOrder->user_id);
                 $pack = Pack::find($paymentProductOrder->pack_id);
                 if ($user && $pack) {
                     $commissionService = new \App\Services\Core\Services\CommissionService();
                     $commissionService->distribute($paymentProductOrder, $user, $pack);
                 }
+            }
+
+            if ((int) $dataBody->state === PaymentProductOrder::ANULADO) {
+                app(\App\Services\Core\FinanceIGService::class)->registerCancellation($paymentProductOrder->id);
             }
 
             DB::commit();
@@ -388,6 +393,8 @@ class PaymentProductOrderController extends BaseController
 
             PaymentProductOrderDetail::insert($productListCreate);
 
+            app(\App\Services\Core\FinanceIGService::class)->captureOrderPricing($paymentProductOrder->id);
+
             $flowPaymentResult = $this->flowPayment->createEmail(
                 $paymentProductOrder->id,
                 "Pago Productos".$paymentProductOrder->id,
@@ -556,6 +563,8 @@ class PaymentProductOrderController extends BaseController
 
             PaymentProductOrderDetail::insert($productListCreate);
 
+            app(\App\Services\Core\FinanceIGService::class)->captureOrderPricing($paymentProductOrder->id);
+
             $orderId = uniqid( $paymentProductOrder->id );
 
             // BODY izipay
@@ -669,6 +678,8 @@ class PaymentProductOrderController extends BaseController
                 )
             );
 
+            app(\App\Services\Core\FinanceIGService::class)->registerSale($paymentProductOrder->id);
+
             LogPayment::where( 'log_order_id' , $dataBody->orderId )->update(array(
                 'message' => "PAGADO",
                 'apiController' => "IzipayController::izipayConfirmPayment",
@@ -763,7 +774,7 @@ class PaymentProductOrderController extends BaseController
 
             }
 
-            $this->confirmPointAfiliado( $userCurrent, $paymentProductOrder->points , $personalPoint);
+            $this->confirmPointAfiliado($userCurrent, $paymentProductOrder);
 
             DB::commit();
             return $this->sendResponse( array() , 'Confirm');
@@ -876,6 +887,8 @@ class PaymentProductOrderController extends BaseController
 
             PaymentProductOrderDetail::insert($productListCreate);
 
+            app(\App\Services\Core\FinanceIGService::class)->captureOrderPricing($paymentProductOrder->id);
+
             DB::commit();
 
             return $this->sendResponse( array(
@@ -911,6 +924,8 @@ class PaymentProductOrderController extends BaseController
                     "state" => PaymentLog::PAGADO,
                 )
             );
+
+            app(\App\Services\Core\FinanceIGService::class)->registerSale($paymentProductOrder->id);
 
             LogPayment::where( 'log_order_id' , $dataBody->orderId )->update(array(
                 'message' => "PAGADO",
@@ -1051,6 +1066,8 @@ class PaymentProductOrderController extends BaseController
 
             PaymentProductOrderDetail::insert($productListCreate);
 
+            app(\App\Services\Core\FinanceIGService::class)->captureOrderPricing($paymentProductOrder->id);
+
             DB::commit();
             return $this->sendResponse( array() , 'paymentCash');
         } catch (Exception $e) {
@@ -1082,6 +1099,8 @@ class PaymentProductOrderController extends BaseController
                 )
             );
 
+            app(\App\Services\Core\FinanceIGService::class)->registerSale($paymentProductOrder->id);
+
             PaymentProductOrderPoint::create(
                 array(
                     'payment_product_order_id'  => $paymentProductOrder->id,
@@ -1102,11 +1121,10 @@ class PaymentProductOrderController extends BaseController
 
             $userCurrent = User::find( $paymentProductOrder->user_id );
 
+            $this->confirmPointAfiliado($userCurrent, $paymentProductOrder);
+
             if( $personalPoint >= floatval($maxPointsProduct->option_value) )
             {
-
-                $this->confirmPointAfiliado( $userCurrent, $paymentProductOrder->points , $personalPoint);
-
                 $paymentLog = PaymentLog::with(['paymentOrder.pack'])
                     ->where( "user_id" ,  $paymentProductOrder->user_id )
 
@@ -1211,9 +1229,25 @@ class PaymentProductOrderController extends BaseController
         return ($calculateHash == $hash);
     }
 
-    private function confirmPointAfiliado( $userCurrent, $points , $totalPoints)
+    private function confirmPointAfiliado($userCurrent, PaymentProductOrder $productOrder): void
     {
-        (new CommissionService())->confirmPointAfiliado($userCurrent, $points);
+        // Ambos confirmadores ya estan dentro de una transaccion. El bloqueo
+        // serializa reintentos del mismo pedido sin exigir token unico global.
+        PaymentProductOrder::whereKey($productOrder->id)->lockForUpdate()->firstOrFail();
+        $reference = PaymentOrder::firstOrCreate(
+            ['token' => 'PRODUCT-RESIDUAL-'.$productOrder->id],
+            [
+                'currency' => 'PEN',
+                'amount' => 0,
+                'sponsor_code' => (new \App\Services\Core\NetworkTreeService())
+                    ->sponsorCode($userCurrent->uuid) ?? 'COMPANY',
+                'pack_id' => $productOrder->pack_id,
+                'user_id' => $userCurrent->id,
+            ]
+        );
+        (new CommissionService())->confirmPointAfiliado(
+            $userCurrent, $productOrder->points, null, $reference->id, 'product'
+        );
     }
 
     private function confirmPoint( $paymentOrder , $userCurrent , $packCurrent, $reactiveAdmin = false)

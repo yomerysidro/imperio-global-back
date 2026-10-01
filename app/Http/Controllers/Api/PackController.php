@@ -193,6 +193,12 @@ class PackController extends BaseController
 
     public function patrocinio(Request $request)
     {
+        $validator = Validator::make($request->all(), [
+            'level6' => 'sometimes|required|numeric|between:0,100',
+            'level7' => 'sometimes|required|numeric|between:0,100',
+        ]);
+        if ($validator->fails()) return $this->sendError($validator->errors());
+
         try {
             DB::beginTransaction();
             $user_id = Auth::id();
@@ -219,6 +225,12 @@ class PackController extends BaseController
                     'level4'    => $dataBody->level4,
                     'level5'    => $dataBody->level5,
                 ));
+            }
+            foreach ([6, 7] as $level) {
+                if ($request->exists('level'.$level)) {
+                    SponsorshipPoint::where('pack_id', $dataBody->pack_id)
+                        ->update(['level'.$level => $dataBody->{'level'.$level}]);
+                }
             }
             foreach (range(1, 5) as $level) {
                 CommissionRule::updateOrCreate([

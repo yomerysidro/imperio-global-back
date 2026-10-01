@@ -101,23 +101,55 @@ class ProductController extends BaseController
     public function destroy(string $productId)
     {
         if ($response = $this->denyUnlessAdmin()) return $response;
-        $product = Product::find($productId);
-        if (!$product) return $this->sendError('Producto no encontrado.', [], 404);
+        $result = DB::transaction(function () use ($productId) {
+            $product = Product::whereKey($productId)->lockForUpdate()->first();
+            if (!$product) return ['status' => 'not_found'];
 
-        if (PaymentProductOrderDetail::where('product_id', $product->id)->exists()) {
+            if (PaymentProductOrderDetail::where('product_id', $productId)->exists()) {
+                return ['status' => 'sold'];
+            }
+
+            $movements = DB::table('product_inventory_movement_details as d')
+                ->join('product_inventory_movements as m', 'm.id', '=', 'd.inventory_movement_id')
+                ->where('d.product_id', $productId)
+                ->get(['m.id', 'm.movement_type']);
+            if ($movements->contains(fn ($movement) => !in_array(
+                $movement->movement_type, ['INITIAL_ENTRY', 'PURCHASE_ENTRY'], true
+            ))) {
+                return ['status' => 'has_exits'];
+            }
+
+            $movementIds = $movements->pluck('id')->unique();
+            DB::table('product_inventory_movement_details')->where('product_id', $productId)->delete();
+            foreach ($movementIds as $movementId) {
+                if (!DB::table('product_inventory_movement_details')
+                    ->where('inventory_movement_id', $movementId)->exists()) {
+                    DB::table('product_inventory_movements')->where('id', $movementId)->delete();
+                }
+            }
+
+            ProductPointPack::where('product_id', $productId)->delete();
+            $fileId = $product->file;
+            $product->delete();
+            return ['status' => 'deleted', 'file_id' => $fileId];
+        });
+
+        if ($result['status'] === 'not_found') return $this->sendError('Producto no encontrado.', [], 404);
+        if ($result['status'] === 'sold') {
             return $this->sendError(
                 'No se puede eliminar porque el producto tiene ventas registradas. Puede despublicarlo.',
                 [],
                 409
             );
         }
-
-        $fileId = $product->file;
-        DB::transaction(function () use ($product) {
-            ProductPointPack::where('product_id', $product->id)->delete();
-            $product->delete();
-        });
-        if ($fileId) $this->deleteImage($fileId);
+        if ($result['status'] === 'has_exits') {
+            return $this->sendError(
+                'No se puede eliminar porque el producto tiene salidas o ajustes de inventario. Puede despublicarlo.',
+                [],
+                409
+            );
+        }
+        if ($result['file_id']) $this->deleteImage($result['file_id']);
 
         return $this->sendResponse(true, 'Producto eliminado definitivamente.');
     }

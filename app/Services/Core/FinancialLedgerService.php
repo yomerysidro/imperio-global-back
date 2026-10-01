@@ -50,7 +50,8 @@ class FinancialLedgerService
             if (in_array($movement->type, [
                 PaymentOrderPoint::RESIDUAL,
                 PaymentOrderPoint::RESIDUAL_SERVICIO,
-            ], true)) return true;
+            ], true) || ($movement->type === PaymentOrderPoint::INFINITO
+                && $movement->source_user_code && (int) $movement->level >= 8)) return true;
             $category = $movement->type === PaymentOrderPoint::RESIDUAL_SERVICIO ? 'service'
                 : ($movement->type === PaymentOrderPoint::RESIDUAL ? 'product' : null);
             return $category
