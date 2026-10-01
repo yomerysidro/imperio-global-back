@@ -948,7 +948,7 @@ class UserController extends BaseController
 
                 $newOrder = PaymentOrder::create([
                     'currency'     => "PEN",
-                    'amount'       => 0,
+                    'amount'       => $pack->price,
                     'sponsor_code' => $currentSponsor,
                     'pack_id'      => $pack->id,
                     "token"        => 'AUTO-' . uniqid()

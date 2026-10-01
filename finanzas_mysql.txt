@@ -1,0 +1,118 @@
+-- MODULO BASICO DE FINANZAS DE PRODUCTOS - MYSQL
+-- Solo crea estructura. No contiene INSERT, UPDATE ni DELETE.
+-- Los ID nuevos son INT UNSIGNED AUTO_INCREMENT.
+-- product_id replica exactamente el tipo, charset y collation de
+-- ig_products.id: CHAR(36) utf8mb3_unicode_ci.
+-- El modulo no se relaciona directamente con ig_users.
+
+-- 1. Costo promedio vigente del producto para la empresa.
+-- price sigue siendo el precio de venta al publico y stock sigue siendo
+-- el unico saldo actual disponible.
+ALTER TABLE ig_products
+    ADD COLUMN company_unit_cost DECIMAL(14,2) UNSIGNED NOT NULL DEFAULT 0.00
+        AFTER price;
+
+-- 2. Fotografia financiera de cada detalle de venta nueva.
+-- Se dejan NULL para no interpretar ni modificar ventas anteriores.
+ALTER TABLE ig_payment_product_order_details
+    ADD COLUMN public_unit_price_snapshot DECIMAL(14,2) UNSIGNED NULL
+        AFTER price,
+    ADD COLUMN discount_percentage DECIMAL(5,2) UNSIGNED NULL
+        AFTER public_unit_price_snapshot,
+    ADD COLUMN discount_amount DECIMAL(14,2) UNSIGNED NULL
+        AFTER discount_percentage,
+    ADD COLUMN sale_unit_price DECIMAL(14,2) UNSIGNED NULL
+        AFTER discount_amount;
+
+-- 3. Cabecera de la operacion de inventario.
+-- Se crea una sola cabecera por operacion, aunque incluya varios productos.
+-- Tipos previstos: INITIAL_ENTRY, PURCHASE_ENTRY, SALE_EXIT,
+-- SALE_CANCELLATION, RETURN_ENTRY, ADJUSTMENT_ENTRY, ADJUSTMENT_EXIT.
+CREATE TABLE ig_product_inventory_movements (
+    id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+    movement_type VARCHAR(40) NOT NULL,
+    movement_date DATETIME NOT NULL,
+    description VARCHAR(500) NULL,
+    created_at TIMESTAMP NULL DEFAULT NULL,
+    updated_at TIMESTAMP NULL DEFAULT NULL,
+    PRIMARY KEY (id),
+    INDEX idx_ig_inv_mov_type_date (movement_type, movement_date)
+) ENGINE=InnoDB;
+
+-- 4. Lineas/pivote del movimiento.
+-- Esta tabla es la que relaciona obligatoriamente cada movimiento con sus
+-- lineas y cada linea con un producto:
+--   ig_product_inventory_movements.id
+--       1 ---- N inventory_movement_id
+--   ig_products.id
+--       1 ---- N product_id
+-- Una linea de salida puede relacionarse, ademas, con la linea de venta que
+-- la origino mediante payment_product_order_detail_id.
+-- No se utiliza autorrelacion: lote, cantidad y costo se guardan directamente
+-- en cada linea del movimiento.
+CREATE TABLE ig_product_inventory_movement_details (
+    id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+    inventory_movement_id INT UNSIGNED NOT NULL,
+    product_id CHAR(36)
+        CHARACTER SET utf8mb3 COLLATE utf8mb3_unicode_ci NOT NULL,
+    payment_product_order_detail_id BIGINT UNSIGNED NULL,
+    quantity INT UNSIGNED NOT NULL,
+    company_unit_cost DECIMAL(14,2) UNSIGNED NOT NULL DEFAULT 0.00,
+    additional_cost DECIMAL(14,2) UNSIGNED NOT NULL DEFAULT 0.00,
+    total_cost DECIMAL(16,2)
+        GENERATED ALWAYS AS (
+            ROUND((quantity * company_unit_cost) + additional_cost, 2)
+        ) STORED,
+    lot_code VARCHAR(100) NULL,
+    expiration_at DATE NULL,
+    created_at TIMESTAMP NULL DEFAULT NULL,
+    updated_at TIMESTAMP NULL DEFAULT NULL,
+    PRIMARY KEY (id),
+    CONSTRAINT chk_ig_inv_mov_det_quantity CHECK (quantity > 0),
+    CONSTRAINT chk_ig_inv_mov_det_cost CHECK (company_unit_cost >= 0),
+    CONSTRAINT chk_ig_inv_mov_det_additional CHECK (additional_cost >= 0),
+    CONSTRAINT fk_ig_inv_mov_det_header
+        FOREIGN KEY (inventory_movement_id)
+        REFERENCES ig_product_inventory_movements (id)
+        ON UPDATE CASCADE ON DELETE CASCADE,
+    CONSTRAINT fk_ig_inv_mov_det_product
+        FOREIGN KEY (product_id) REFERENCES ig_products (id)
+        ON UPDATE CASCADE ON DELETE RESTRICT,
+    CONSTRAINT fk_ig_inv_mov_det_sale
+        FOREIGN KEY (payment_product_order_detail_id)
+        REFERENCES ig_payment_product_order_details (id)
+        ON UPDATE CASCADE ON DELETE RESTRICT,
+    INDEX idx_ig_inv_mov_det_header (inventory_movement_id),
+    INDEX idx_ig_inv_mov_det_product (product_id),
+    INDEX idx_ig_inv_mov_det_sale (payment_product_order_detail_id),
+    INDEX idx_ig_inv_mov_det_lot (product_id, lot_code)
+) ENGINE=InnoDB;
+
+-- RESUMEN:
+-- Tablas nuevas:
+--   ig_product_inventory_movements        (cabecera)
+--   ig_product_inventory_movement_details (detalle/pivote)
+-- Campo nuevo en ig_products:
+--   company_unit_cost
+-- Campos nuevos en ig_payment_product_order_details:
+--   public_unit_price_snapshot, discount_percentage,
+--   discount_amount, sale_unit_price
+--
+-- RELACIONES (las FK se declaran en el lado N, que es la tabla de lineas):
+--   ig_product_inventory_movements.id
+--       1 ---- N ig_product_inventory_movement_details.inventory_movement_id
+--
+--   ig_products.id
+--       1 ---- N ig_product_inventory_movement_details.product_id
+--
+--   ig_payment_product_order_details.id
+--       1 ---- N ig_product_inventory_movement_details.payment_product_order_detail_id
+--
+-- CALCULOS:
+--   total_cost = (quantity * company_unit_cost) + additional_cost
+--   costo de ventas = suma de total_cost de movimientos SALE_EXIT
+--   ganancia bruta = ventas netas - costo de ventas
+--
+-- No se incluye una tabla de gastos generales. Por ello, este modulo calcula
+-- ganancia bruta o utilidad comercial antes de gastos generales, no utilidad
+-- neta contable de toda la empresa.

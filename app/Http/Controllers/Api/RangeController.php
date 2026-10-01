@@ -162,7 +162,7 @@ class RangeController extends BaseController
             if( !$userModel->is_admin ) return $this->sendError( "No tiene permisos ese usuario" );
 
             $engine = app(RangeQualificationService::class);
-            $response = ['range' => $engine->recalculateAll(), 'infinito' => $engine->distributeInfinity()];
+            $response = ['range' => $engine->recalculateAll(), 'infinito' => []];
             DB::commit();
             return $this->sendResponse($response, 'Rangos recalculados desde la configuracion de BD');
 

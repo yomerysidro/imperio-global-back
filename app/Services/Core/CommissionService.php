@@ -74,7 +74,8 @@ class CommissionService
             : PaymentOrderPoint::PATROCINIO_SERVICIO;
 
         $visited = [];
-        $maxNetworkLevel = (int) CommissionRule::where('state', true)->max('level');
+        $maxNetworkLevel = max(5, (int) CommissionRule::where('state', true)->max('level'));
+        $sponsorshipConfig = SponsorshipPoint::where('pack_id', $paymentOrder->pack_id)->first();
         while (!empty($currentSponsorCode) && $level <= $maxNetworkLevel) {
             $normalizedSponsor = strtoupper($currentSponsorCode);
             if (isset($visited[$normalizedSponsor])) break;
@@ -155,11 +156,8 @@ class CommissionService
             )) {
                 // El porcentaje corresponde al paquete que originó la afiliación,
                 // no al paquete personal del beneficiario.
-                $sponsorshipConfig = CommissionRule::where('bonus_type', CommissionRule::SPONSORSHIP)
-                    ->where('pack_id', $paymentOrder->pack_id)->where('level', $level)->where('state', true)->first();
-
                 if ($sponsorshipConfig) {
-                    $percent = (float) $sponsorshipConfig->percentage;
+                    $percent = $sponsorshipConfig->percentageForLevel($level);
 
                     if ($percent > 0) {
                         $montoDinero = round(($puntosBaseNuevoSocio * $percent) / 100, 2);
@@ -242,18 +240,14 @@ class CommissionService
 
             // 🔥 OBTENER EL ÁRBOL COMPLETO DEL USUARIO (línea ascendente)
             $_paymentOrderPoints = $this->networkTreeService->loopTree([], $userCurrent->uuid);
-            $maxResidualLevel = (int) CommissionRule::where('bonus_type', CommissionRule::RESIDUAL)
-                ->where('category', $category)->where('state', true)->max('level');
+            $policy = new ResidualCommissionPolicy();
             $countLevel          = 0;
 
-            // Recorrer la linea ascendente hasta el ultimo nivel residual configurado.
+            // La red termina en su raiz; el 1 % general no tiene limite de nivel.
             foreach ($_paymentOrderPoints as $key => $_paymentOrderPoint) {
                 $_paymentOrderPoint = (object) $_paymentOrderPoint;
                 $countLevel++;
                 
-                if ($countLevel > $maxResidualLevel) break;
-
-                $point = 0;
                 $beneficiaryCode = $_paymentOrderPoint->sponsor_code;
                 $beneficiary = User::where('uuid', $beneficiaryCode)->first();
                 $isCompany = $beneficiary && (
@@ -261,26 +255,24 @@ class CommissionService
                     || strcasecmp((string) $beneficiary->uuid, 'DOSB') === 0
                 );
                 $beneficiaryRangeOrder = (int) ($beneficiary?->range?->range?->order ?? 0);
-                $rule = CommissionRule::with('minimumRange')->where('bonus_type', CommissionRule::RESIDUAL)
-                    ->where('category', $category)
-                    ->where('level', $countLevel)->where('state', true)->first();
-                $requiredRangeOrder = (int) ($rule?->minimumRange?->order ?? 0);
                 $isActive = $beneficiary
                     ? app(ActivationService::class)->isActiveForCategory($beneficiary, $category)
                     : false;
-                // Los tres primeros niveles no requieren rango. Esta regla vive
-                // tambien en codigo para que se aplique desde el despliegue,
-                // incluso antes de sincronizar la configuracion de la BD.
-                $meetsRangeRequirement = $isCompany || $category === 'service' || $countLevel <= 3
-                    || $beneficiaryRangeOrder >= $requiredRangeOrder;
-                $percent = ($rule && $beneficiary && $isActive && $meetsRangeRequirement)
-                    ? (float) $rule->percentage : 0;
-                $point = $points * $percent / 100;
+                [$percent, $kind] = $policy->rate(
+                    $category, $countLevel, $beneficiaryRangeOrder,
+                    $countLevel > 7 && $beneficiary && $isActive
+                        ? app(ActivationService::class)->hasRankActivity($beneficiary) : false,
+                    (bool) $isCompany
+                );
+                $type = $kind === 'infinity' ? PaymentOrderPoint::INFINITO
+                    : ($category === 'service'
+                        ? PaymentOrderPoint::RESIDUAL_SERVICIO
+                        : PaymentOrderPoint::RESIDUAL);
+                $point = $isActive ? round((float) $points * $percent / 100, 2) : 0.0;
                 $exists = PaymentOrderPoint::where('payment_order_id', $paymentOrderId)
                     ->where('user_code', $beneficiaryCode)
-                    ->where('type', $category === 'service'
-                        ? PaymentOrderPoint::RESIDUAL_SERVICIO
-                        : PaymentOrderPoint::RESIDUAL)
+                    ->whereIn('type', [PaymentOrderPoint::RESIDUAL,
+                        PaymentOrderPoint::RESIDUAL_SERVICIO, PaymentOrderPoint::INFINITO])
                     ->where('level', $countLevel)
                     ->exists();
 
@@ -294,9 +286,7 @@ class CommissionService
                         'source_user_code' => $userCurrent->uuid,
                         'point'            => $point,
                         'payment'          => 0, // No es pago directo
-                        'type'             => $category === 'service'
-                            ? PaymentOrderPoint::RESIDUAL_SERVICIO
-                            : PaymentOrderPoint::RESIDUAL,
+                        'type'             => $type,
                         'level'            => $countLevel,
                         'user_id'          => $beneficiary->id,
                         'state'            => 1 // Activo
@@ -307,9 +297,7 @@ class CommissionService
                     $summary['blocked'][] = [
                         'level' => $countLevel,
                         'user_code' => $beneficiaryCode,
-                        'reason' => !$rule ? 'rule_not_configured'
-                            : (!$isActive ? 'beneficiary_inactive'
-                            : (!$meetsRangeRequirement ? 'minimum_range_not_met' : 'zero_percentage')),
+                        'reason' => !$isActive ? 'beneficiary_inactive' : 'zero_percentage',
                     ];
                 }
             }

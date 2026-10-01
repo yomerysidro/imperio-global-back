@@ -6,6 +6,7 @@ use App\Http\Controllers\Api\LoginController;
 use App\Http\Controllers\Api\PackController;
 use App\Http\Controllers\Api\UserController;
 use App\Http\Controllers\Api\FinanceController; // Importante
+use App\Http\Controllers\Api\FinanceIGController;
 use App\Http\Controllers\Api\PaymentOrderController;
 use App\Http\Controllers\Api\OptionController;
 use App\Http\Controllers\Api\PaymentOrderPointController;
@@ -132,6 +133,16 @@ Route::prefix('v1')->group(function () {
             Route::get('payment-detail/find-all', [PaymentProductOrderController::class, 'findAllDetails']);
             Route::post('cash-pre', [PaymentProductOrderController::class, 'paymentCash']);
             Route::post('cash-confirm', [PaymentProductOrderController::class, 'paymentCashConfirm']);
+        });
+
+        Route::prefix('finance-ig')->group(function () {
+            Route::get('inventory/movements', [FinanceIGController::class, 'inventoryMovements']);
+            Route::post('inventory/entry', [FinanceIGController::class, 'registerEntry']);
+            Route::post('inventory/sale', [FinanceIGController::class, 'registerSale']);
+            Route::post('inventory/cancellation', [FinanceIGController::class, 'registerCancellation']);
+            Route::get('monthly-report', [FinanceIGController::class, 'monthlyReport']);
+            Route::get('affiliation-packs', [FinanceIGController::class, 'affiliationPacks']);
+            Route::get('product-sales-details', [FinanceIGController::class, 'productSalesDetails']);
         });
 
         Route::get('points/list', [PaymentOrderPointController::class, 'points']);
