@@ -49,6 +49,7 @@ class NetworkBranchMoveConfirmationGateTest extends TestCase
 
     public function test_local_testing_opt_in_requires_localhost_and_imperiog(): void
     {
+        $this->app->detectEnvironment(fn () => 'local');
         config([
             'network_moves.backend_certified' => false,
             'network_moves.confirmation_enabled' => true,
@@ -63,6 +64,20 @@ class NetworkBranchMoveConfirmationGateTest extends TestCase
         config(['database.connections.mysql.host' => 'db.production.internal']);
         $response = (new NetworkBranchMoveController($moves))->status();
         $this->assertSame(['confirmation_enabled' => false, 'mode' => 'disabled'], $response->getData(true));
+    }
+
+    public function test_production_cannot_use_the_local_testing_exception(): void
+    {
+        $this->app->detectEnvironment(fn () => 'production');
+        config([
+            'network_moves.backend_certified' => false,
+            'network_moves.confirmation_enabled' => true,
+            'network_moves.local_testing_enabled' => true,
+            'database.connections.mysql.host' => '127.0.0.1',
+            'database.connections.mysql.database' => 'imperiog',
+        ]);
+        $controller = new NetworkBranchMoveController(Mockery::mock(NetworkBranchMoveService::class));
+        $this->assertSame(['confirmation_enabled' => false, 'mode' => 'disabled'], $controller->status()->getData(true));
     }
 
     public function test_single_confirmation_accepts_codes_and_executes_one_step_move_when_certified(): void

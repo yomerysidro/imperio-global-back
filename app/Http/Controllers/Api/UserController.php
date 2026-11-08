@@ -902,6 +902,9 @@ class UserController extends BaseController
 
         try {
             DB::beginTransaction();
+            if ($request->filled('packId') || $request->filled('serviceId')) {
+                $this->networkTreeService->lockRootForMutation();
+            }
 
             $userUpdated = User::where("uuid", $request->userCode)->first();
             if (!$userUpdated) {
@@ -957,6 +960,11 @@ class UserController extends BaseController
                     ->first();
 
                 if ($existingPackRecord) {
+                    // Saving an unchanged pack in the profile editor is not a
+                    // purchase. Preserve its order and complete distribution.
+                    if ((string) $existingPackRecord->paymentOrder?->pack_id === (string) $pack->id) {
+                        return;
+                    }
                     $existingPackRecord->update(['state' => false]);
                     if ($existingPackRecord->paymentOrder) {
                         PaymentLog::where('payment_order_id', $existingPackRecord->payment_order_id)
@@ -1274,10 +1282,9 @@ class UserController extends BaseController
                 return $this->sendError("Este DNI ya existe");
             }
 
-            $sponsor     = User::where("uuid", $dataBody->sponsor)->first();
-            if ($sponsor == null) {
-                DB::rollBack();
-                return $this->sendError('Código de Patrocinador no existe.');
+            $sponsor = app(\App\Services\Core\AffiliationService::class)->sponsor((string) $dataBody->sponsor);
+            if (User::where('email', $dataBody->email)->orWhere('uuid', trim($dataBody->dni))->exists()) {
+                throw new \RuntimeException('El correo o DNI ya esta registrado.');
             }
 
             $packCurrent     = Pack::find($dataBody->plan);
@@ -1292,6 +1299,8 @@ class UserController extends BaseController
                 'uuid'     => trim($dataBody->dni),
                 'password' => bcrypt($dataBody->password)
             ]);
+
+            app(\App\Services\Core\AffiliationService::class)->attach($userCreated, $sponsor->uuid, 'admin_registration');
 
             $codeGenerator = new CodeGenerator();
             VerificationCodeUser::create([
@@ -1328,7 +1337,7 @@ class UserController extends BaseController
                 'uuid'    => $userCreated->uuid,
                 'message' => 'Usuario y red de puntos activada correctamente.'
             ], 'Usuario creado exitosamente');
-        } catch (Exception $e) {
+        } catch (\Throwable $e) {
             DB::rollBack();
             return $this->sendError("Fallo en registro: " . $e->getMessage(), [], 500);
         }
@@ -1443,7 +1452,6 @@ class UserController extends BaseController
 
         try {
             $dataBody = (object) $request->all();
-            DB::beginTransaction();
 
             $dateNow    = Carbon::now();
             $inviteUser = InviteUser::where('token', '=', $dataBody->token)->first();
@@ -1453,19 +1461,17 @@ class UserController extends BaseController
             if ($inviteUser->expired_time < $dateNow) return $this->sendResponse("", "El codigo de invitación ha expirado.", false);
 
             $sponsor = User::where('uuid', $inviteUser->sponsor_user_code)->first();
-            if (!$sponsor) {
-                DB::rollBack();
+            if (!$sponsor || !$this->networkTreeService->belongsToNetwork(
+                $this->networkTreeService->rootCode(), $sponsor->uuid
+            )) {
                 return $this->sendResponse("", "El patrocinador de la invitacion no existe.", false);
             }
-
-            DB::commit();
             return $this->sendResponse([
                 'token' => $dataBody->token,
                 'sponsor_code' => $sponsor->uuid,
                 'sponsor_name' => $sponsor->name,
             ], '');
         } catch (Exception $e) {
-            DB::rollBack();
             return $this->sendError($e->getMessage(), [], 402);
         }
     }
@@ -1474,7 +1480,7 @@ class UserController extends BaseController
     {
         $validator = Validator::make($request->all(), [
             'token'  => 'required',
-            "accept" => 'required',
+            "accept" => 'required|boolean',
         ]);
 
         if ($validator->fails()) return $this->sendError('Error de validacion.', $validator->errors(), 422);
@@ -1487,14 +1493,14 @@ class UserController extends BaseController
             $this->networkTreeService->lockRootForMutation();
             $dateNow    = Carbon::now();
             $dataBody   = (object) $request->all();
-            $inviteUser = InviteUser::where('token', '=', $dataBody->token)->first();
+            $inviteUser = InviteUser::where('token', '=', $dataBody->token)->lockForUpdate()->first();
 
             $paymentLog       = PaymentLog::where("user_id", $userId)->whereIn("state", [PaymentLog::PAGADO, PaymentLog::TERMINADO])->first();
-            if ($paymentLog != null) return $this->sendResponse("", "Este usuario ya tiene un patrocinador.", false);
+            if ($paymentLog != null) { DB::rollBack(); return $this->sendResponse("", "Este usuario ya tiene un patrocinador.", false); }
 
-            if ($inviteUser        == null) return $this->sendResponse("", "No existe el codigo de invitación.", false);
-            if ($inviteUser->state == false) return $this->sendResponse("", "El codigo de invitación esta desabilitado.", false);
-            if ($inviteUser->expired_time < $dateNow) return $this->sendResponse("", "El codigo de invitación ha expirado.", false);
+            if ($inviteUser        == null) { DB::rollBack(); return $this->sendResponse("", "No existe el codigo de invitación.", false); }
+            if ($inviteUser->state == false) { DB::rollBack(); return $this->sendResponse("", "El codigo de invitación esta desabilitado.", false); }
+            if ($inviteUser->expired_time < $dateNow) { DB::rollBack(); return $this->sendResponse("", "El codigo de invitación ha expirado.", false); }
 
             GuestsTokenUser::create([
                 'sponsor_user_code' => $inviteUser->sponsor_user_code,
@@ -1503,18 +1509,15 @@ class UserController extends BaseController
                 'state'             => $dataBody->accept
             ]);
 
-            if ($dataBody->accept && strcasecmp($inviteUser->sponsor_user_code, $userModel->uuid) !== 0) {
-                SponsorRelation::updateOrCreate(
-                    ['user_code' => $userModel->uuid],
-                    ['sponsor_code' => $inviteUser->sponsor_user_code, 'source' => 'invitation', 'state' => true]
-                );
+            if ($request->boolean('accept')) {
+                app(\App\Services\Core\AffiliationService::class)->attach($userModel, $inviteUser->sponsor_user_code, 'invitation');
             }
 
             InviteUser::where('token', '=', $dataBody->token)->update(["state" => false]);
 
             DB::commit();
             return $this->sendResponse(1, '');
-        } catch (Exception $e) {
+        } catch (\Throwable $e) {
             DB::rollBack();
             return $this->sendError($e->getMessage(), [], 402);
         }
@@ -1530,17 +1533,8 @@ class UserController extends BaseController
                 return $this->sendResponse("", "Usuario no encontrado", false);
             }
 
-            // sponsor_relations es la fuente actual del arbol. El servicio ya
-            // conserva compatibilidad con puntos de compra antiguos.
+            // La genealogia vigente se consulta exclusivamente en sponsor_relations.
             $sponsorCode = $this->networkTreeService->sponsorCode($userModel->uuid);
-
-            // Respaldo para invitaciones legacy que aun no fueron migradas.
-            if (!$sponsorCode) {
-                $sponsorCode = GuestsTokenUser::where("guest_user_code", $userModel->uuid)
-                    ->where("state", true)
-                    ->value('sponsor_user_code');
-            }
-
             if (!$sponsorCode) {
                 return $this->sendResponse("", "No tiene ningun sponsor invitado", false);
             }
@@ -1562,9 +1556,7 @@ class UserController extends BaseController
             GuestsTokenUser::where("guest_user_code", $userModel->uuid)
                 ->where("state", true)
                 ->update(["state" => false]);
-            SponsorRelation::where('user_code', $userModel->uuid)
-                ->where('source', 'invitation')
-                ->update(['state' => false]);
+            // Established genealogy survives invitation cancellation.
 
             DB::commit();
             return $this->sendResponse(1, '');

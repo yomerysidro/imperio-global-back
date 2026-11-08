@@ -1104,12 +1104,13 @@ class PaymentProductOrderController extends BaseController
 
         try {
             DB::beginTransaction();
+            app(\App\Services\Core\NetworkTreeService::class)->lockRootForMutation();
             $dataBody = (object) $request->all();
             $userId = Auth::id();
 
             $paymentProductOrder = PaymentProductOrder::where("id", $dataBody->paymentId)->lockForUpdate()->first();
 
-            if( $paymentProductOrder == null || !in_array((int) $paymentProductOrder->state, [PaymentProductOrder::PREORDER, PaymentProductOrder::PAGADO], true) ) return $this->sendError('No se encontro orden de pago.');
+            if( $paymentProductOrder == null || !in_array((int) $paymentProductOrder->state, [PaymentProductOrder::PREORDER, PaymentProductOrder::PAGADO], true) ) { DB::rollBack(); return $this->sendError('No se encontro orden de pago.'); }
             if ((int) $paymentProductOrder->state === PaymentProductOrder::PAGADO) {
                 DB::commit();
                 return $this->sendResponse([], 'paymentCash');
@@ -1206,7 +1207,7 @@ class PaymentProductOrderController extends BaseController
 
             return $this->sendResponse( array() , 'paymentCashConfirm');
 
-        } catch (Exception $e) {
+        } catch (\Throwable $e) {
             DB::rollBack();
             return $this->sendError( $e->getMessage() , [] , 402 );
         }
@@ -1256,15 +1257,15 @@ class PaymentProductOrderController extends BaseController
         // Ambos confirmadores ya estan dentro de una transaccion. El bloqueo
         // serializa reintentos del mismo pedido sin exigir token unico global.
         PaymentProductOrder::whereKey($productOrder->id)->lockForUpdate()->firstOrFail();
+        $sponsorCode = (new \App\Services\Core\NetworkTreeService())->sponsorCode($userCurrent->uuid, true);
+        if (!$sponsorCode) throw new \RuntimeException('El socio no tiene patrocinador genealogico vigente.');
         $reference = PaymentOrder::firstOrCreate(
             ['token' => 'PRODUCT-RESIDUAL-'.$productOrder->id],
             [
                 'currency' => 'PEN',
                 'amount' => 0,
-                'sponsor_code' => (new \App\Services\Core\NetworkTreeService())
-                    ->sponsorCode($userCurrent->uuid) ?? 'COMPANY',
+                'sponsor_code' => $sponsorCode,
                 'pack_id' => $productOrder->pack_id,
-                'user_id' => $userCurrent->id,
             ]
         );
         (new CommissionService())->confirmPointAfiliado(
