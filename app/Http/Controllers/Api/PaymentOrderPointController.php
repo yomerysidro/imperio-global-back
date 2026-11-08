@@ -258,7 +258,8 @@ class PaymentOrderPointController extends BaseController
 
             // CONTADORES DEL ÁRBOL
             $userModel->directos = count($this->networkTreeService->directUserCodes($userModel->uuid));
-            $userModel->activos = $networkPoints->where('active', true)->count();
+            $networkMetrics = app(\App\Services\Core\NetworkActivityMetrics::class)->forUser($userModel);
+            $userModel->activos = $networkMetrics['total_active'];
             $userModel->red_total = $this->networkTreeService->countTotalNetworkRecursive($userModel->uuid);
             $userModel->personas_red = $userModel->red_total;
 
@@ -329,8 +330,8 @@ class PaymentOrderPointController extends BaseController
                 'points' => $networkPoints->values(), 'user' => $userModel,
                 'network_tree' => $root,
                 'network_meta' => [
-                    'source' => 'sponsor_relations', 'total_directs' => count($childrenByParent[strtoupper($userModel->uuid)] ?? []),
-                    'total_network' => count($allDownlineCodes), 'returned_nodes' => $pointsByCode->count(),
+                    ...$networkMetrics,
+                    'returned_nodes' => $pointsByCode->count(),
                     'complete' => $pointsByCode->count() === count($allDownlineCodes),
                 ],
             ], 'Éxito');
