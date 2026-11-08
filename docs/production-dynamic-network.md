@@ -20,6 +20,10 @@ Se requiere PHP 8.2 o superior (composer.json), PDO MySQL, MySQL 8 e InnoDB. Usa
 
 `2026_11_06_000000` crea `network_move_audits` InnoDB. `2026_11_07_000001` agrega unicidad de `users.uuid`: si existen duplicados, falla sin fusionar cuentas; deben revisarse antes del despliegue.
 
+La migración de auditoría es compatible con instalaciones donde un DBA creó la tabla antes de que la migración se registrara: consulta `Schema::hasTable('network_move_audits')` (Laravel aplica el prefijo), valida columnas, nulabilidad, defaults, auto incremento, InnoDB e índices por sus columnas y propiedades, y solo crea la tabla si falta. Si es incompatible falla sin alterarla. Su método `down()` es intencionalmente vacío para que un rollback no borre una tabla manual ni sus registros.
+
+El workflow de GitHub Actions ejecuta migraciones pendientes, pero no corre el recálculo financiero histórico. Ese comando queda como operación separada y solo escribe si un operador lo invoca manualmente con `--apply`, después de revisar primero el resultado sin esa opción: `php artisan residuals:recalculate AÑO MES`.
+
 Se retiraron las reparaciones históricas que imponían usuarios locales, reconstruían patrocinios desde bonos o recalculaban importes antiguos. Sus archivos conservan el nombre para respetar el historial de migraciones, pero no vuelven a modificar datos. La migración inicial de `sponsor_relations` conserva el backfill de invitaciones aceptadas y primeras compras de cuentas existentes; ya no impone una rama corporativa. En una base vacía no crea usuarios ni relaciones. Las migraciones ya aplicadas no se reejecutan ni revierten automáticamente sus cambios anteriores.
 
 No ejecutar rollback de migraciones históricas sobre producción sin revisar su efecto. Los niveles de genealogía se derivan de las relaciones actuales; no se reescriben niveles ni patrocinadores en puntos históricos.
