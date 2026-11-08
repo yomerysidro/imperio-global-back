@@ -66,15 +66,6 @@ return new class extends Migration
             ]);
         }
 
-        // La raíz corporativa tiene una única pierna directa: WAdz.
-        DB::table('sponsor_relations')->updateOrInsert(
-            ['user_code' => 'WAdz'],
-            ['sponsor_code' => 'DOSB', 'source' => 'corporate_root', 'state' => true, 'updated_at' => now()]
-        );
-        DB::table('sponsor_relations')
-            ->where('sponsor_code', 'DOSB')
-            ->where('user_code', '!=', 'WAdz')
-            ->update(['sponsor_code' => 'WAdz', 'source' => 'corp_normalized', 'updated_at' => now()]);
     }
 
     public function down(): void

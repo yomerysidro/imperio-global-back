@@ -196,7 +196,7 @@ class FinanceController extends BaseController
 
             foreach ($ranges->sortByDesc('points') as $range) {
                 if ($range->points <= $totalPoints
-                    && (strcasecmp((string) $user->uuid, 'DOSB') === 0 || $range->childs <= $directs)) {
+                    && (strcasecmp((string) $user->uuid, app(\App\Services\Core\CorporateRootService::class)->uuid()) === 0 || $range->childs <= $directs)) {
                     $rangeCurrent    = $range;
                     break;
                 }
@@ -781,6 +781,8 @@ class FinanceController extends BaseController
         try {
             $user_id = Auth::id();
             DB::beginTransaction();
+            $networkTree = app(\App\Services\Core\NetworkTreeService::class);
+            $networkTree->lockRootForMutation();
             $userModel = User::with(['file'])->find($user_id);
 
             if (!$userModel->is_admin) {
@@ -970,9 +972,10 @@ class FinanceController extends BaseController
                 'state'                    => true
             ]);
 
-            $sponsorCode = $paymentLog?->paymentOrder?->sponsor_code
-                ?? SponsorRelation::where('user_code', $userUpdated->uuid)->value('sponsor_code')
-                ?? 'COMPANY';
+            $sponsorCode = $networkTree->sponsorCode($userUpdated->uuid, true);
+            if (!$sponsorCode) {
+                throw new \RuntimeException('No se puede reactivar: el socio no tiene patrocinador genealogico vigente.');
+            }
 
             // Referencia unica del ciclo mensual. No representa una nueva compra
             // del pack y por eso su importe es cero; permite separar ganancias
@@ -1007,10 +1010,7 @@ class FinanceController extends BaseController
                 $sponsorUser                               = User::where('uuid', $currentSponsorCode)->first();
                 if (!$sponsorUser) break;
 
-                $relation = PaymentOrderPoint::where('user_code', $currentSponsorCode)
-                    ->where('type', PaymentOrderPoint::COMPRA)
-                    ->first();
-                $superiorSponsorCode = $relation ? $relation->sponsor_code : '';
+                $superiorSponsorCode = $networkTree->sponsorCode($currentSponsorCode, true) ?? '';
 
                 PaymentOrderPoint::create([
                     'manual_reactivation_id' => $reactivation->id,
@@ -1203,7 +1203,7 @@ class FinanceController extends BaseController
         try {
             DB::beginTransaction();
             $user = User::where('uuid', $request->input('userCode'))->lockForUpdate()->firstOrFail();
-            if ($user->is_admin || strcasecmp((string) $user->uuid, 'DOSB') === 0) {
+            if ($user->is_admin || strcasecmp((string) $user->uuid, app(\App\Services\Core\CorporateRootService::class)->uuid()) === 0) {
                 DB::rollBack();
                 return $this->sendError('La cuenta corporativa o administrativa no puede desactivarse.', [], 422);
             }
@@ -1528,120 +1528,14 @@ class FinanceController extends BaseController
 
     public function changeSponsor(Request $request)
     {
-        $validator = Validator::make($request->all(), [
-            'userCode'    => 'required|exists:users,uuid',
-            'sponsorCode' => 'required|exists:users,uuid|different:userCode',
-        ]);
-
-        if ($validator->fails()) return $this->sendError('Error de validacion.', $validator->errors(), 422);
-
-        try {
-            $dataBody    = (object) $request->all();
-            $userCurrent = User::where("uuid", 'like', $dataBody->userCode)->first();
-
-            $descendants = $this->networkTreeService->getAllNetworkUsers($userCurrent->uuid);
-            if (collect($descendants)->contains(fn ($code) => strcasecmp($code, $dataBody->sponsorCode) === 0)) {
-                return $this->sendError('El patrocinador seleccionado pertenece a la red descendente del usuario.');
-            }
-
-            // El servicio incluye al propio usuario en el resultado. Cualquier
-            // elemento adicional representa una rama descendente, sin importar
-            // si proviene de la tabla actual o de las relaciones heredadas.
-            if (count($descendants) > 1) {
-                return $this->sendError('Este usuario tiene invitados debajo de él.');
-            }
-
-            DB::beginTransaction();
-
-            $paymentLog = PaymentLog::with(['paymentOrder'])->where("user_id",  $userCurrent->id)
-                ->where(function ($query) {
-                    $query->where('state', PaymentLog::PAGADO)
-                        ->orWhere('state', PaymentLog::TERMINADO);
-                })
-                ->orderBy('created_at', 'desc')
-                ->first();
-
-            PaymentOrder::where("id", $paymentLog->paymentOrder->id)->update([
-                "sponsor_code" => $dataBody->sponsorCode
-            ]);
-
-            PaymentOrderPoint::where("user_id", $userCurrent->id)->update(["sponsor_code" => $dataBody->sponsorCode]);
-            SponsorRelation::updateOrCreate(
-                ['user_code' => $userCurrent->uuid],
-                ['sponsor_code' => $dataBody->sponsorCode, 'source' => 'manual', 'state' => true]
-            );
-
-            DB::commit();
-            return $this->sendResponse(1, '');
-        } catch (Exception $e) {
-            DB::rollBack();
-            return $this->sendError($e->getMessage(), [], 402);
-        }
+        $request->merge(['newSponsorCode' => $request->input('sponsorCode')]);
+        return app(NetworkBranchMoveController::class)->confirm($request);
     }
 
     public function changeSponsorWithNetwork(Request $request)
     {
-        if (!Auth::user()?->is_admin) {
-            return $this->sendError('No tiene permisos para mover una red.', [], 403);
-        }
-
-        $validator = Validator::make($request->all(), [
-            'userCode' => 'required|exists:users,uuid',
-            'sponsorCode' => 'required|exists:users,uuid|different:userCode',
-        ]);
-        if ($validator->fails()) {
-            return $this->sendError('Error de validacion.', $validator->errors(), 422);
-        }
-
-        $userCode = (string) $request->input('userCode');
-        $sponsorCode = (string) $request->input('sponsorCode');
-        if (strcasecmp($userCode, 'DOSB') === 0) {
-            return $this->sendError('La raiz corporativa no puede moverse.', [], 422);
-        }
-        if (strcasecmp($sponsorCode, 'DOSB') === 0
-            && strcasecmp($userCode, 'WAdz') !== 0) {
-            return $this->sendError('DOSB solo puede tener a WAdz como usuario directo.', [], 422);
-        }
-
-        $descendants = $this->networkTreeService->getAllNetworkUsers($userCode);
-        if (collect($descendants)->contains(fn ($code) => strcasecmp((string) $code, $sponsorCode) === 0)) {
-            return $this->sendError('El patrocinador seleccionado pertenece a la rama que se intenta mover.', [], 422);
-        }
-
-        try {
-            $result = DB::transaction(function () use ($userCode, $sponsorCode, $descendants) {
-                $user = User::where('uuid', $userCode)->lockForUpdate()->firstOrFail();
-                $sponsor = User::where('uuid', $sponsorCode)->lockForUpdate()->firstOrFail();
-                $oldSponsor = $this->networkTreeService->sponsorCode($user->uuid);
-
-                SponsorRelation::updateOrCreate(
-                    ['user_code' => $user->uuid],
-                    ['sponsor_code' => $sponsor->uuid, 'source' => 'manual_branch_move', 'state' => true]
-                );
-
-                // Solo los asientos personales activos representan el enlace
-                // estructural actual. Las comisiones y movimientos historicos
-                // de los descendientes permanecen intactos.
-                PaymentOrderPoint::where('user_code', $user->uuid)
-                    ->where('type', PaymentOrderPoint::COMPRA)
-                    ->where('state', true)
-                    ->update(['sponsor_code' => $sponsor->uuid]);
-
-                return [
-                    'user_code' => $user->uuid,
-                    'old_sponsor_code' => $oldSponsor,
-                    'new_sponsor_code' => $sponsor->uuid,
-                    'moved_descendants' => max(count($descendants) - 1, 0),
-                    'moved_network' => true,
-                ];
-            });
-
-            return $this->sendResponse($result, 'Usuario y red movidos correctamente.');
-        } catch (Exception $e) {
-            return $this->sendError('No se pudo mover la red: '.$e->getMessage(), [], 422);
-        }
+        return $this->changeSponsor($request);
     }
-    
     public function getCorporativeDashboard()
     {
         try {
@@ -1652,7 +1546,7 @@ class FinanceController extends BaseController
                 return $this->sendError("Usuario no encontrado");
             }
 
-            $directCodes = $this->networkTreeService->directUserCodes('DOSB');
+            $directCodes = $this->networkTreeService->directUserCodes(app(\App\Services\Core\CorporateRootService::class)->uuid());
             $directosLegacy = collect($directCodes)->map(fn ($code) => (object) ['guest_user_code' => $code]);
             $totalDirectos = count($directCodes);
 
@@ -1669,10 +1563,10 @@ class FinanceController extends BaseController
             }
 
             // Usando el servicio inyectado
-            $networkCodes = $this->networkTreeService->getAllNetworkUsers('DOSB');
-            $descendantCodes = array_values(array_filter($networkCodes, fn ($code) => strcasecmp($code, 'DOSB') !== 0));
+            $networkCodes = $this->networkTreeService->getAllNetworkUsers(app(\App\Services\Core\CorporateRootService::class)->uuid());
+            $descendantCodes = array_values(array_filter($networkCodes, fn ($code) => strcasecmp($code, app(\App\Services\Core\CorporateRootService::class)->uuid()) !== 0));
             $totalRed = count($descendantCodes);
-            $tree     = $this->networkTreeService->buildDescendantTree('DOSB', 0, 15);
+            $tree     = $this->networkTreeService->buildDescendantTree(app(\App\Services\Core\CorporateRootService::class)->uuid(), 0, 15);
 
             $historicalGroupVolume = DB::query()->fromSub(
                 PaymentOrderPoint::select('payment_order_id', DB::raw('MAX(point) as point'))

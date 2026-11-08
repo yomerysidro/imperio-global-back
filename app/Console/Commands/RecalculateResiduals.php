@@ -51,7 +51,7 @@ class RecalculateResiduals extends Command
                     break;
                 }
 
-                $isCompany = $beneficiary->is_admin || $normalized === 'DOSB';
+                $isCompany = $beneficiary->is_admin || app(\App\Services\Core\CorporateRootService::class)->isRootCode($beneficiary->uuid);
                 $isActive = $isCompany || $activation->isActiveForCategoryPeriod(
                     $beneficiary, $category, $from, $to, true
                 );

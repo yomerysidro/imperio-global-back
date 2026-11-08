@@ -17,8 +17,7 @@ class ActivationService
 
     public function isActive(User $user): bool
     {
-        // DOSB es la raiz corporativa del sistema MLM y nunca vence.
-        if ($user->is_admin || strcasecmp((string) $user->uuid, 'DOSB') === 0) return true;
+        if ($user->is_admin || app(CorporateRootService::class)->isRootCode($user->uuid)) return true;
         if (ManualReactivation::where('user_id', $user->id)
             ->where('period', now()->startOfMonth()->toDateString())
             ->where('state', ManualReactivation::ACTIVE)->exists()) return true;
@@ -66,7 +65,7 @@ class ActivationService
     /** La modalidad de mayor puntaje es el requisito mensual de rango. */
     public function hasRankActivity(User $user): bool
     {
-        if ($user->is_admin || strcasecmp((string) $user->uuid, 'DOSB') === 0) return true;
+        if ($user->is_admin || app(CorporateRootService::class)->isRootCode($user->uuid)) return true;
         if (!$this->isActive($user)) return false;
 
         $rule = ActivationRule::where('state', true)->orderByDesc('minimum_points')->first();
@@ -123,7 +122,7 @@ class ActivationService
         CarbonInterface $to,
         bool $includeClosed = true
     ): bool {
-        if ($user->is_admin || strcasecmp((string) $user->uuid, 'DOSB') === 0) return true;
+        if ($user->is_admin || app(CorporateRootService::class)->isRootCode($user->uuid)) return true;
 
         $category = strtolower(trim($category));
         $manual = ManualReactivation::where('user_id', $user->id)
@@ -195,7 +194,7 @@ class ActivationService
 
     public function isActiveForPeriod(User $user, CarbonInterface $from, CarbonInterface $to, bool $includeClosed = true): bool
     {
-        if ($user->is_admin || strcasecmp((string) $user->uuid, 'DOSB') === 0) return true;
+        if ($user->is_admin || app(CorporateRootService::class)->isRootCode($user->uuid)) return true;
 
         $cacheKey = $user->id.':'.$from->format('Y-m').':'.($includeClosed ? 'closed' : 'open');
         if (array_key_exists($cacheKey, self::$activeCache)) return self::$activeCache[$cacheKey];

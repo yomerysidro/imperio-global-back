@@ -183,20 +183,6 @@ class Calculator
             }
         }
 
-        // =========================================================
-        // 3. 🔥 BONIFICAR PUNTOS POR INVITADOS HISTÓRICOS (DOSB)
-        // =========================================================
-        // Si el usuario es DOSB (raíz corporativa), sumar puntos por cada invitado histórico
-        if (strtoupper($userCode) === 'DOSB') {
-            $legacyCount = \App\Models\GuestsTokenUser::where('sponsor_user_code', $userCode)
-                ->where('state', true)
-                ->count();
-            
-            // Cada invitado histórico aporta puntos base
-            $puntosPorInvitado = 100;
-            $puntosProducto += ($legacyCount * $puntosPorInvitado);
-        }
-
         // Totales
         $personalTotal = $puntosProducto + $puntosServicio;
         $patrocinioTotal = $patrocinioProducto + $patrocinioServicio;

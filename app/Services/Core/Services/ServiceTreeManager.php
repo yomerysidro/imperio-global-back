@@ -20,7 +20,7 @@ class ServiceTreeManager
         $visited[$normalized] = true;
 
         $tree = new NetworkTreeService();
-        $sponsorCode = $tree->sponsorCode($userCode);
+        $sponsorCode = $tree->sponsorCode($userCode, true);
         if (!$sponsorCode) return;
 
         $sponsor = User::where('uuid', $sponsorCode)->first();
@@ -34,7 +34,7 @@ class ServiceTreeManager
                 'type' => PaymentOrderPoint::PATROCINIO_SERVICIO,
                 'level' => $level,
             ], [
-                'sponsor_code' => $tree->sponsorCode($sponsor->uuid) ?? '',
+                'sponsor_code' => $tree->sponsorCode($sponsor->uuid, true) ?? '',
                 'source_user_code' => $userCode,
                 'point' => $commission,
                 'payment' => false,
@@ -48,7 +48,7 @@ class ServiceTreeManager
             'user_code' => $sponsor->uuid,
             'type' => PaymentOrderPoint::GRUPAL,
         ], [
-            'sponsor_code' => $tree->sponsorCode($sponsor->uuid) ?? '',
+            'sponsor_code' => $tree->sponsorCode($sponsor->uuid, true) ?? '',
             'source_user_code' => $userCode,
             'point' => $points,
             'payment' => false,

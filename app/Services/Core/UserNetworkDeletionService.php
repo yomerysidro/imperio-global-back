@@ -26,7 +26,7 @@ class UserNetworkDeletionService
             ->get(['id', 'uuid', 'email', 'is_admin']);
 
         if ($users->contains(fn (User $user) => $user->is_admin
-            || in_array(strtoupper($user->uuid), ['DOSB', 'WADZ'], true))) {
+            || app(CorporateRootService::class)->isRootCode($user->uuid))) {
             throw new RuntimeException('No se puede eliminar una red que contenga usuarios administrativos o corporativos.');
         }
 
@@ -60,6 +60,7 @@ class UserNetworkDeletionService
             $userCodes,
             $userEmails
         ): void {
+            $this->networkTreeService->lockRootForMutation();
             if (!$withNetwork && $directChildCodes) {
                 foreach ($directChildCodes as $childCode) {
                     DB::table('sponsor_relations')->updateOrInsert(

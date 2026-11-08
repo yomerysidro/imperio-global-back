@@ -198,8 +198,14 @@ class PaymentProductOrderController extends BaseController
             $userCurrent = User::find($userId);
             if(  !$userCurrent->is_admin ) return $this->sendError('Este usuario no tiene permisos');
 
-            $paymentProductOrder = PaymentProductOrder::find( $dataBody->orderId );
+            $paymentProductOrder = PaymentProductOrder::whereKey($dataBody->orderId)->lockForUpdate()->first();
             if( $paymentProductOrder == null ) return $this->sendError( "No se encuentra orden de pedido" );
+
+            if ((int) $dataBody->state === PaymentProductOrder::PAGADO
+                && (int) $paymentProductOrder->state === PaymentProductOrder::PAGADO) {
+                DB::commit();
+                return $this->sendResponse(1, 'La orden ya estaba pagada; no se duplicaron puntos ni comisiones.');
+            }
 
             PaymentProductOrder::where("id" , $dataBody->orderId)->update(
                 array( "state" => $dataBody->state )
@@ -657,7 +663,7 @@ class PaymentProductOrderController extends BaseController
             $formAnswer = (object) $request->input('clientAnswer');
             $orderId = $formAnswer->orderDetails['orderId'];
 
-            $paymentProductOrder = PaymentProductOrder::where( "token" , $orderId )->first();
+            $paymentProductOrder = PaymentProductOrder::where( "token" , $orderId )->lockForUpdate()->first();
 
             if( $paymentProductOrder == null ) {
                 DB::rollBack();
@@ -668,6 +674,13 @@ class PaymentProductOrderController extends BaseController
                     'jsonResponse' => json_encode( $formAnswer ),
                 ));
                 return $this->sendError( "Payment Order no existe" );
+            }
+
+            // Izipay can retry a valid callback. Do not create points or
+            // commissions a second time for an order already finalized.
+            if ((int) $paymentProductOrder->state === PaymentProductOrder::PAGADO) {
+                DB::commit();
+                return $this->sendResponse([], 'Confirm');
             }
 
             $userCurrent = User::find( $paymentProductOrder->user_id );
@@ -916,8 +929,13 @@ class PaymentProductOrderController extends BaseController
 
             $userId = Auth::id();
             $userCurrent = User::find($userId);
-            $paymentProductOrder = PaymentProductOrder::where( "id" , $dataBody->orderId )->first();
+            $paymentProductOrder = PaymentProductOrder::where( "id" , $dataBody->orderId )->lockForUpdate()->first();
             if( $paymentProductOrder == null ) return $this->sendError( "orden no existe" );
+
+            if ((int) $paymentProductOrder->state === PaymentProductOrder::PAGADO) {
+                DB::commit();
+                return $this->sendResponse(['order' => $paymentProductOrder->id], 'Pago confirmado y red activada de forma autónoma.');
+            }
 
             PaymentProductOrder::where("id" , $paymentProductOrder->id )->update(
                 array(
@@ -1089,9 +1107,13 @@ class PaymentProductOrderController extends BaseController
             $dataBody = (object) $request->all();
             $userId = Auth::id();
 
-            $paymentProductOrder = PaymentProductOrder::where("id", $dataBody->paymentId)->where("state", PaymentProductOrder::PREORDER)->first();
+            $paymentProductOrder = PaymentProductOrder::where("id", $dataBody->paymentId)->lockForUpdate()->first();
 
-            if( $paymentProductOrder == null ) return $this->sendError('No se encontro orden de pago.');
+            if( $paymentProductOrder == null || !in_array((int) $paymentProductOrder->state, [PaymentProductOrder::PREORDER, PaymentProductOrder::PAGADO], true) ) return $this->sendError('No se encontro orden de pago.');
+            if ((int) $paymentProductOrder->state === PaymentProductOrder::PAGADO) {
+                DB::commit();
+                return $this->sendResponse([], 'paymentCash');
+            }
 
             PaymentProductOrder::where("id" , $paymentProductOrder->id )->update(
                 array(

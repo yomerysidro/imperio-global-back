@@ -56,40 +56,13 @@ class User extends Authenticatable
 
     protected $appends = ['active', 'package_name'];
 
-    /**
-     * Determina si el usuario está activo
-     * Los usuarios especiales (DOSB, WAdz) siempre están activos
-     */
     public function getActiveAttribute()
     {
-        // USUARIOS ESPECIALES: SIEMPRE ACTIVOS
         return app(\App\Services\Core\ActivationService::class)->isActive($this);
-        /* Legacy activation logic retained temporarily below; unreachable by design.
-        $specialUsers = ['DOSB', 'WAdz'];
-        
-        if (in_array($this->uuid, $specialUsers)) {
-            return true;
-        }
-        
-        // Criterio Unificado: ¿Tiene algún pago de servicio o producto en estado 2 (PAGADO) o 6 (TERMINADO) en el mes actual?
-        $hasService = PaymentLog::where('user_id', $this->id)
-            ->whereIn('state', [2, 6])
-            ->whereMonth('created_at', now()->month)
-            ->whereYear('created_at', now()->year)
-            ->exists();
-
-        $hasProduct = PaymentProductOrder::where('user_id', $this->id)
-            ->whereIn('state', [2, 3, 6])
-            ->whereMonth('created_at', now()->month)
-            ->whereYear('created_at', now()->year)
-            ->exists();
-
-        return $hasService || $hasProduct; */
     }
-
     public function getPackageNameAttribute()
     {
-        if (strtoupper($this->uuid) === 'DOSB') {
+        if (app(\App\Services\Core\CorporateRootService::class)->isRootCode($this->uuid)) {
             return 'Corporativo';
         }
 

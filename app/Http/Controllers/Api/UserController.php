@@ -12,6 +12,7 @@ use Illuminate\Support\Facades\Validator;
 use Illuminate\Support\Facades\DB;
 use App\Models\PaymentLog;
 use App\Services\Core\FileUpload;
+use App\Services\Core\ActivationService;
 use App\Http\Resources\PaginationCollection;
 use App\Models\Pack;
 use App\Models\PaymentOrder;
@@ -241,6 +242,32 @@ class UserController extends BaseController
                 'rango_actual'        => $user->range?->range?->title ?? 'Sin rango'
             ];
 
+            // Network cards use the live sponsor graph, independently of
+            // point eligibility, package state, and historical snapshots.
+            $directCodes = $this->networkTreeService->directUserCodes($user->uuid);
+            $networkCodes = array_values(array_filter(
+                $this->networkTreeService->getAllNetworkUsers($user->uuid),
+                fn ($code) => strcasecmp((string) $code, (string) $user->uuid) !== 0
+            ));
+            $activationService = app(\App\Services\Core\ActivationService::class);
+            $directUsers = User::whereIn('uuid', $directCodes)->get();
+            $networkUsers = User::whereIn('uuid', $networkCodes)->get();
+            $activeDirects = $directUsers->filter(fn (User $member) => $activationService->isActive($member))->count();
+            $activeNetwork = $networkUsers->filter(fn (User $member) => $activationService->isActive($member))->count();
+            $user->directos = count($directCodes);
+            $user->directos_patrocinados = count($directCodes);
+            $user->directos_activos = $activeDirects;
+            $user->activos = $activeNetwork;
+            $user->red_total = count($networkCodes);
+            $user->personas_red = count($networkCodes);
+            $user->network_summary = [
+                'total_directs' => count($directCodes),
+                'total_directs_active' => $activeDirects,
+                'total_active' => $activeNetwork,
+                'total_network' => count($networkCodes),
+                'source' => 'sponsor_relations',
+            ];
+
             // 🔥 LOG PARA DEPURACIÓN EN EL BACKEND (revisa storage/logs/laravel.log)
             \Log::info('✅ show() - Usuario consultado:', [
                 'uuid' => $user->uuid,
@@ -293,7 +320,7 @@ class UserController extends BaseController
             }
         }
 
-        if ($userModel->is_admin || strcasecmp((string) $userModel->uuid, 'DOSB') === 0) {
+        if ($userModel->is_admin || strcasecmp((string) $userModel->uuid, app(\App\Services\Core\CorporateRootService::class)->uuid()) === 0) {
             $isActive = true;
             if ($servicePayment) {
                 $servicePayment->state = PaymentLog::PAGADO;
@@ -332,8 +359,8 @@ class UserController extends BaseController
 
         // La cuenta corporativa debe mostrar el mismo ciclo visible que el
         // resto del sistema. Durante la gracia ese ciclo es el mes anterior,
-        // incluso si DOSB tiene un registro administrativo del mes actual.
-        if ($userModel->is_admin || strcasecmp((string) $userModel->uuid, 'DOSB') === 0) {
+        // incluso si la raíz corporativa tiene un registro administrativo del mes actual.
+        if ($userModel->is_admin || strcasecmp((string) $userModel->uuid, app(\App\Services\Core\CorporateRootService::class)->uuid()) === 0) {
             [$visibleFrom] = app(\App\Services\Core\ActivationService::class)->visiblePeriod($now);
             $mesFiltro = $visibleFrom->month;
             $anioFiltro = $visibleFrom->year;
@@ -364,10 +391,10 @@ class UserController extends BaseController
         $gananciaPatrocinio = $this->sponsorshipTotal($paymentOrderPointsUser);
         $puntosInfinito   = $paymentOrderPointsUser->where('type', 'I')->sum('point'); // INFINITO
 
-        // DOSB es la cuenta corporativa y no depende de plan, actividad ni
+        // la raíz corporativa es la cuenta corporativa y no depende de plan, actividad ni
         // rango. Su Home usa el mismo libro que Finanzas/Excel para evitar que
         // una segunda lógica deje en cero comisiones que sí existen.
-        if ($userModel->is_admin || strcasecmp((string) $userModel->uuid, 'DOSB') === 0) {
+        if ($userModel->is_admin || strcasecmp((string) $userModel->uuid, app(\App\Services\Core\CorporateRootService::class)->uuid()) === 0) {
             $companyCommissions = app(FinancialLedgerService::class)->summary(
                 Carbon::create($anioFiltro, $mesFiltro, 1)->startOfMonth(),
                 Carbon::create($anioFiltro, $mesFiltro, 1)->endOfMonth(),
@@ -391,8 +418,8 @@ class UserController extends BaseController
         // alimentar los indicadores actuales del Home.
         $legacyTokens = collect();
 
-        // 🔥 CORRECCIÓN 5: LÓGICA PARA DOSB (CORPORATIVO)
-        if (strtoupper($userModel->uuid) == 'DOSB') {
+        // 🔥 CORRECCIÓN 5: LÓGICA PARA la raíz corporativa (CORPORATIVO)
+        if (app(\App\Services\Core\CorporateRootService::class)->isRootCode($userModel->uuid)) {
             $directosLegacy = $this->networkTreeService->directUserCodes($userModel->uuid);
 
             $userModel->directos = count($directosLegacy);
@@ -413,10 +440,10 @@ class UserController extends BaseController
                     if ($hasPayment || $hasProduct) $activos++;
                 }
             }
-            $networkUsers = $this->networkTreeService->getAllNetworkUsers('DOSB');
+            $networkUsers = $this->networkTreeService->getAllNetworkUsers(app(\App\Services\Core\CorporateRootService::class)->uuid());
             $descendantCodes = array_values(array_filter(
                 $networkUsers,
-                fn ($code) => strcasecmp($code, 'DOSB') !== 0
+                fn ($code) => strcasecmp($code, app(\App\Services\Core\CorporateRootService::class)->uuid()) !== 0
             ));
 
             $monthlyGroupVolume = DB::query()->fromSub(
@@ -583,6 +610,7 @@ class UserController extends BaseController
 
         try {
             DB::beginTransaction();
+            $this->networkTreeService->lockRootForMutation();
             $dataBody = (object) $request->all();
             $user_id  = Auth::id();
             User::where("id", $user_id)->update([
@@ -765,7 +793,7 @@ class UserController extends BaseController
                 }
             }
 
-            if ($user->is_admin || strcasecmp((string) $user->uuid, 'DOSB') === 0) {
+            if ($user->is_admin || strcasecmp((string) $user->uuid, app(\App\Services\Core\CorporateRootService::class)->uuid()) === 0) {
                 $isActive = true;
             }
 
@@ -1023,13 +1051,20 @@ class UserController extends BaseController
             $user_id   = Auth::id();
             $userModel = User::with(['file'])->find($user_id);
 
-            if (!$userModel->is_admin) return $this->sendError("No tiene permisos ese usuario");
+            if (!$userModel) return $this->sendError('La sesión no identifica un usuario válido.', [], 401);
+            if (!$userModel->is_admin) return $this->sendError('Solo administradores pueden buscar socios.', [], 403);
 
             $userList = User::with(['file']);
 
-            if ($request->has('code')) if (!empty($request->query('code'))) $userList   = $userList->where("uuid", 'like', $request->query('code'));
-            if ($request->has('email')) if (!empty($request->query('email'))) $userList = $userList->where("email", 'like', $request->query('email'));
-            if ($request->has('name')) if (!empty($request->query('name'))) $userList   = $userList->where("name", 'like', '%' . ($request->query('name')) . '%');
+            if ($request->filled('code')) {
+                $userList->whereRaw('UPPER(uuid) = ?', [strtoupper(trim((string) $request->query('code')))]);
+            }
+            if ($request->filled('email')) {
+                $userList->whereRaw('LOWER(email) = ?', [mb_strtolower(trim((string) $request->query('email')))]);
+            }
+            if ($request->filled('name')) {
+                $userList->where('name', 'like', '%' . trim((string) $request->query('name')) . '%');
+            }
 
             $userList = $userList->orderBy('created_at', 'desc')->get();
 
@@ -1037,14 +1072,27 @@ class UserController extends BaseController
                 $ownedPayment = $this->latestOwnedPackagePayment($user->id);
                 $userList[$key]->payment = $this->displayPaymentPayload(
                     $ownedPayment,
-                    app(ActivationService::class)->isActive($user)
+                    app(\App\Services\Core\ActivationService::class)->isActive($user)
                 );
                 $userList[$key]->package_name = $user->package_name;
+                $sponsorCode = $this->networkTreeService->sponsorCode($user->uuid);
+                $sponsor = $sponsorCode
+                    ? User::with('file')->whereRaw('UPPER(uuid) = ?', [strtoupper($sponsorCode)])->first()
+                    : null;
+                $userList[$key]->current_sponsor_code = $sponsor?->uuid;
+                $userList[$key]->sponsor_code = $sponsor?->uuid;
+                $userList[$key]->sponsor_name = $sponsor?->name;
+                $userList[$key]->sponsor = $sponsor ? [
+                    'uuid' => $sponsor->uuid,
+                    'name' => $sponsor->name,
+                    'file' => $sponsor->file,
+                ] : null;
             }
 
             return $this->sendResponse($userList, 'Lista');
         } catch (\Throwable $th) {
-            return $this->sendError($th->getMessage());
+            report($th);
+            return $this->sendError('No fue posible buscar socios por un error interno.', [], 500);
         }
     }
 
@@ -1446,6 +1494,7 @@ class UserController extends BaseController
             $userModel = User::with(['paymentActive'])->find($userId);
 
             DB::beginTransaction();
+            $this->networkTreeService->lockRootForMutation();
             $dateNow    = Carbon::now();
             $dataBody   = (object) $request->all();
             $inviteUser = InviteUser::where('token', '=', $dataBody->token)->first();
@@ -1519,6 +1568,7 @@ class UserController extends BaseController
             $userModel = User::with(['paymentActive'])->find($userId);
 
             DB::beginTransaction();
+            $this->networkTreeService->lockRootForMutation();
             GuestsTokenUser::where("guest_user_code", $userModel->uuid)
                 ->where("state", true)
                 ->update(["state" => false]);
