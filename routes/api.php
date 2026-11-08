@@ -30,6 +30,7 @@ Route::prefix('v1')->group(function () {
         ->middleware('throttle:5,1');
     Route::post('auth/validate-code/{uuid}', [LoginController::class, 'validate'])
         ->middleware('throttle:5,1');
+    Route::post('auth/reset-password', [LoginController::class, 'resetPassword'])->middleware('throttle:5,1');
     Route::get('auth/export', [UserController::class, 'export']);
 
     Route::post('payment/flow/confirm/{uuid}', [PaymentOrderController::class, 'flowConfirm']);
