@@ -244,29 +244,14 @@ class UserController extends BaseController
 
             // Network cards use the live sponsor graph, independently of
             // point eligibility, package state, and historical snapshots.
-            $directCodes = $this->networkTreeService->directUserCodes($user->uuid);
-            $networkCodes = array_values(array_filter(
-                $this->networkTreeService->getAllNetworkUsers($user->uuid),
-                fn ($code) => strcasecmp((string) $code, (string) $user->uuid) !== 0
-            ));
-            $activationService = app(\App\Services\Core\ActivationService::class);
-            $directUsers = User::whereIn('uuid', $directCodes)->get();
-            $networkUsers = User::whereIn('uuid', $networkCodes)->get();
-            $activeDirects = $directUsers->filter(fn (User $member) => $activationService->isActive($member))->count();
-            $activeNetwork = $networkUsers->filter(fn (User $member) => $activationService->isActive($member))->count();
-            $user->directos = count($directCodes);
-            $user->directos_patrocinados = count($directCodes);
-            $user->directos_activos = $activeDirects;
-            $user->activos = $activeNetwork;
-            $user->red_total = count($networkCodes);
-            $user->personas_red = count($networkCodes);
-            $user->network_summary = [
-                'total_directs' => count($directCodes),
-                'total_directs_active' => $activeDirects,
-                'total_active' => $activeNetwork,
-                'total_network' => count($networkCodes),
-                'source' => 'sponsor_relations',
-            ];
+            $networkMetrics = app(\App\Services\Core\NetworkActivityMetrics::class)->forUser($user);
+            $user->directos = $networkMetrics['total_directs'];
+            $user->directos_patrocinados = $networkMetrics['total_directs'];
+            $user->directos_activos = $networkMetrics['total_directs_active'];
+            $user->activos = $networkMetrics['total_active'];
+            $user->red_total = $networkMetrics['total_network'];
+            $user->personas_red = $networkMetrics['total_network'];
+            $user->network_summary = $networkMetrics;
 
             // 🔥 LOG PARA DEPURACIÓN EN EL BACKEND (revisa storage/logs/laravel.log)
             \Log::info('✅ show() - Usuario consultado:', [
@@ -542,6 +527,13 @@ class UserController extends BaseController
             ];
         }
 
+        $networkMetrics = app(\App\Services\Core\NetworkActivityMetrics::class)->forUser($userModel);
+        $userModel->directos = $networkMetrics['total_directs'];
+        $userModel->directos_patrocinados = $networkMetrics['total_directs'];
+        $userModel->directos_activos = $networkMetrics['total_directs_active'];
+        $userModel->activos = $networkMetrics['total_active'];
+        $userModel->red_total = $networkMetrics['total_network'];
+        $userModel->personas_red = $networkMetrics['total_network'];
         $userModel->totalPoints = $totalPoints;
 
         // Sincronizar el rango con el mismo volumen B + G que muestra el perfil.
@@ -566,9 +558,7 @@ class UserController extends BaseController
             ->whereIn('type', ['P', 'PS', 'S', 'R', 'RS', 'I'])->values()->toArray();
         $responsePayload['legacy_count']    = $legacyTokens->count();
         $responsePayload['network_summary'] = [
-            'total_directs'      => $userModel->directos ?? 0,
-            'total_active'       => $userModel->activos ?? 0,
-            'total_network'      => $userModel->red_total ?? 0,
+            ...$networkMetrics,
             'has_legacy_network' => $legacyTokens->count() > 0
         ];
 
