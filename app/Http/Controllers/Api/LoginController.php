@@ -123,6 +123,9 @@ class LoginController extends BaseController
 
             DB::beginTransaction();
             $network->lockRootForMutation();
+            if (User::where('email', $request->email)->orWhere('uuid', trim($request->dni))->exists()) {
+                throw new \RuntimeException('El correo o DNI ya esta registrado.');
+            }
             $sponsor = User::whereRaw('UPPER(uuid) = ?', [strtoupper(trim((string) $request->sponsor_code))])->first();
             if (!$sponsor || !$network->belongsToNetwork(app(\App\Services\Core\CorporateRootService::class)->uuid(), $sponsor->uuid)) {
                 throw new \RuntimeException('El patrocinador dejó de pertenecer a la red corporativa.');
@@ -131,7 +134,7 @@ class LoginController extends BaseController
             $user = User::create([
                 'name'     => $request->name,
                 'email'    => $request->email,
-                'uuid'     => $request->dni,
+                'uuid'     => trim($request->dni),
                 'password' => bcrypt($request->password)
             ]);
 
@@ -144,12 +147,7 @@ class LoginController extends BaseController
                 "state" => true
             ]);
 
-            SponsorRelation::create([
-                'user_code' => $user->uuid,
-                'sponsor_code' => $sponsor->uuid,
-                'source' => 'registration',
-                'state' => true,
-            ]);
+            app(\App\Services\Core\AffiliationService::class)->attach($user, $sponsor->uuid, 'registration');
 
             // $mailData = [
             //     'url' => env('APP_URL_FRONT') . '/auth/verification-code/'.$validation->id,

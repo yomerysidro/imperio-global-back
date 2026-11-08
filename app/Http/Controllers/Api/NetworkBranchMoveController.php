@@ -31,7 +31,8 @@ class NetworkBranchMoveController extends Controller
         $localHost = in_array(strtolower((string) config('database.connections.mysql.host')),
             ['127.0.0.1', 'localhost', '::1'], true);
         $localDatabase = config('database.connections.mysql.database') === 'imperiog';
-        $localOptIn = config('network_moves.local_testing_enabled') === true && $localHost && $localDatabase;
+        $localOptIn = app()->environment('local', 'testing')
+            && config('network_moves.local_testing_enabled') === true && $localHost && $localDatabase;
 
         return config('network_moves.confirmation_enabled') === true && ($productionCertified || $localOptIn);
     }

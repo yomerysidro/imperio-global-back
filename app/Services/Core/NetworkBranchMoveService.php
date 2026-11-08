@@ -297,7 +297,7 @@ class NetworkBranchMoveService
                     'operation_id' => $claims['operation_id'],
                     'admin_user_id' => $adminId,
                     'user_code' => $userCode,
-                    'old_sponsor_code' => $plan['old_parents'][$strtoupper($userCode)],
+                    'old_sponsor_code' => $plan['old_parents'][strtoupper($userCode)],
                     'new_sponsor_code' => $newSponsorCode,
                     'descendant_count' => max(count($branch) - 1, 0),
                     'total_affected' => count($plan['affected_codes']),

@@ -933,22 +933,28 @@ class PaymentOrderController extends BaseController
 
         try {
             DB::beginTransaction();
+            app(\App\Services\Core\NetworkTreeService::class)->lockRootForMutation();
             $dataBody = (object) $request->all();
             $userId = Auth::id();
 
             $userSponsor = User::where("uuid", $dataBody->sponsorId)->first();
 
-            if ($userSponsor == null) return $this->sendError('Codigo de Patronisador no existe.');
+            if ($userSponsor == null) { DB::rollBack(); return $this->sendError('Codigo de Patronisador no existe.'); }
 
             $option = Option::where("option_key", "comision")->first();
 
-            $paymentLog = PaymentLog::where("state", PaymentLog::PREORDER)->where('user_id', $userSponsor->id)->first();
+            $paymentLog = PaymentLog::where("state", PaymentLog::PREORDER)->where('user_id', $userSponsor->id)->lockForUpdate()->first();
 
-            if ($paymentLog == null) return $this->sendError('No tienes una pre orden activa.');
+            if ($paymentLog == null) { DB::rollBack(); return $this->sendError('No tienes una pre orden activa.'); }
 
             $paymentOrder = PaymentOrder::where("id", $paymentLog->payment_order_id)->first();
 
-            if ($paymentOrder == null) return $this->sendError('No tienes una pre orden activa.');
+            if ($paymentOrder == null) { DB::rollBack(); return $this->sendError('No tienes una pre orden activa.'); }
+
+            if (PaymentOrderPoint::where("payment_order_id", $paymentOrder->id)->lockForUpdate()->first(["id"])) {
+                DB::rollBack();
+                return $this->sendError("La orden pendiente contiene puntos previos; requiere conciliacion financiera.", [], 422);
+            }
 
             $packCurrent = Pack::find($paymentOrder->pack_id);
 
@@ -966,7 +972,7 @@ class PaymentOrderController extends BaseController
             DB::commit();
 
             return $this->sendResponse(array(), 'paymentCashConfirm');
-        } catch (Exception $e) {
+        } catch (\Throwable $e) {
             DB::rollBack();
             return $this->sendError($e->getMessage(), [], 402);
         }

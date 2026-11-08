@@ -43,7 +43,7 @@ class AccountSecurityTest extends TestCase
 
         $user->refresh();
         $this->assertNotSame($oldPassword, $user->password);
-        $this->assertTrue($verification->fresh()->state);
+        $this->assertTrue((bool) $verification->fresh()->state);
         Mail::assertSent(PasswordUserMail::class, fn ($mail) => $mail->hasTo($user->email));
     }
 

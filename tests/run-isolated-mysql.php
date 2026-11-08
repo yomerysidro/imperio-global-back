@@ -1,6 +1,6 @@
 <?php
 
-// Runs destructive RefreshDatabase tests only against a manually provisioned disposable schema.
+// Runs transactional tests only against a provisioned and migrated disposable schema.
 require dirname(__DIR__).'/vendor/autoload.php';
 $app = require dirname(__DIR__).'/bootstrap/app.php';
 $app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
@@ -42,6 +42,15 @@ putenv('DB_PASSWORD='.$config['password']);
 putenv('APP_ENV=testing');
 putenv('APP_CONFIG_CACHE='.dirname(__DIR__).'/bootstrap/cache/isolated-test-no-config.php');
 
-$command = escapeshellarg(PHP_BINARY).' '.escapeshellarg(__DIR__.'/../vendor/phpunit/phpunit/phpunit').' --filter DynamicNetworkTest';
+if (in_array('--migrate', $argv, true)) {
+    $migration = escapeshellarg(PHP_BINARY).' '.escapeshellarg(__DIR__.'/../artisan').' migrate --force --no-interaction';
+    passthru($migration, $migrationStatus);
+    if ($migrationStatus !== 0) exit($migrationStatus);
+}
+
+$command = escapeshellarg(PHP_BINARY).' '.escapeshellarg(__DIR__.'/../vendor/phpunit/phpunit/phpunit').' --testsuite Unit,Feature';
+foreach ($argv as $argument) {
+    if (str_starts_with($argument, '--filter=')) $command .= ' --filter '.escapeshellarg(substr($argument, 9));
+}
 passthru($command, $status);
 exit($status);

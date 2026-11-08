@@ -41,6 +41,7 @@ class ServiceOrderController extends BaseController
             })->first();
 
             if (!$originalOrder) {
+                DB::rollBack();
                 return $this->sendError("El usuario debe tener un árbol de productos activo primero.");
             }
 

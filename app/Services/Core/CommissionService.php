@@ -42,7 +42,7 @@ class CommissionService
                 PaymentOrderPoint::PATROCINIO, PaymentOrderPoint::PATROCINIO_SERVICIO,
                 PaymentOrderPoint::RESIDUAL, PaymentOrderPoint::RESIDUAL_SERVICIO,
                 PaymentOrderPoint::INFINITO, PaymentOrderPoint::GRUPAL,
-            ])->exists();
+            ])->lockForUpdate()->first(['id']);
         if ($existingDistribution) return;
 
 
@@ -54,6 +54,7 @@ class CommissionService
         if (!$reactiveAdmin) {
             $existingPersonal = PaymentOrderPoint::where('payment_order_id', $paymentOrder->id)
                 ->where('type', PaymentOrderPoint::COMPRA)
+                ->lockForUpdate()
                 ->first();
 
             if (!$existingPersonal) {
@@ -145,7 +146,7 @@ class CommissionService
                 }
             }
 
-            $superiorSponsorCode = $this->networkTreeService->sponsorCode($currentSponsorCode) ?? '';
+            $superiorSponsorCode = $this->networkTreeService->sponsorCode($currentSponsorCode, true) ?? '';
 
             $existingGrupal = PaymentOrderPoint::where('payment_order_id', $paymentOrder->id)
                 ->where('user_code', $currentSponsorCode)
@@ -230,7 +231,7 @@ class CommissionService
     // that could combine old and current beneficiaries.
     if ($paymentOrderId && PaymentOrderPoint::where('payment_order_id', $paymentOrderId)
         ->whereIn('type', [PaymentOrderPoint::RESIDUAL, PaymentOrderPoint::RESIDUAL_SERVICIO, PaymentOrderPoint::INFINITO])
-        ->exists()) {
+        ->lockForUpdate()->first(['id'])) {
         return ['generated_count' => 0, 'generated_amount' => 0.0, 'blocked' => [
             ['reason' => 'distribution_already_started'],
         ]];
@@ -316,7 +317,7 @@ class CommissionService
                         'payment_order_id' => $paymentOrderId,
                         'manual_reactivation_id' => $manualReactivationId,
                         'user_code'        => $beneficiaryCode,
-                        'sponsor_code'     => $this->networkTreeService->sponsorCode($beneficiaryCode) ?? '',
+                        'sponsor_code'     => $this->networkTreeService->sponsorCode($beneficiaryCode, true) ?? '',
                         'source_user_code' => $userCurrent->uuid,
                         'point'            => $point,
                         'payment'          => 0, // No es pago directo
