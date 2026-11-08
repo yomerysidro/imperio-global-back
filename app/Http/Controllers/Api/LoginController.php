@@ -13,7 +13,9 @@ use Illuminate\Support\Facades\Validator;
 use Exception;
 use App\Services\Core\CodeGenerator;
 use App\Mail\CreateUserMail;
-use App\Mail\PasswordUserMail;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Hash;
+use Illuminate\Validation\Rules\Password;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\DB;
 use App\Models\SponsorRelation;
@@ -176,111 +178,159 @@ class LoginController extends BaseController
 
     }
 
+    private function recoveryKey(string $uuid): string
+    {
+        return 'password-recovery:'.$uuid;
+    }
+
+    private function digest(string $value): string
+    {
+        return hash_hmac('sha256', $value, config('app.key'));
+    }
+
+    private function requireRecoveryCache(): void
+    {
+        $driver = config('cache.stores.'.config('cache.default').'.driver');
+        if (!app()->environment('testing') && !in_array($driver, ['database', 'redis', 'memcached', 'dynamodb'], true)) {
+            throw new \RuntimeException('Recovery requires persistent shared cache.');
+        }
+    }
+
+    private function putRecovery(string $uuid, array $pending): void
+    {
+        if (!Cache::put($this->recoveryKey($uuid), $pending, max(1, $pending['expires_at'] - now()->timestamp))) {
+            throw new \RuntimeException('Could not persist recovery.');
+        }
+    }
+
+    private function withRecovery(string $uuid, callable $callback)
+    {
+        try {
+            $this->requireRecoveryCache();
+            $verification = VerificationCodeUser::whereKey($uuid)->where('type', self::PASSWORD_RECOVERY_TYPE)->first();
+            if (!$verification) {
+                return $this->sendError('La solicitud no es valida.', [], 422);
+            }
+            // Resolve ownership outside the transaction so a database cache read
+            // cannot reuse a REPEATABLE READ snapshot taken before the user lock.
+            return DB::transaction(function () use ($uuid, $callback, $verification) {
+                // All recovery mutations lock the user first and reload the request.
+                $user = User::whereKey($verification->user_id)->lockForUpdate()->first();
+                $verification = VerificationCodeUser::whereKey($uuid)->lockForUpdate()->first();
+                $pending = Cache::get($this->recoveryKey($uuid));
+                if (!$user || !$verification || $verification->state || !$pending ||
+                    (int) $pending['user_id'] !== (int) $user->id || $pending['expires_at'] <= now()->timestamp) {
+                    return $this->sendError('La solicitud ha expirado, no es valida o ya fue utilizada.', [], 422);
+                }
+                return $callback($verification, $user, $pending);
+            });
+        } catch (\Throwable $e) {
+            return $this->sendError('No se pudo procesar la recuperacion. Intente nuevamente.', [], 503);
+        }
+    }
+
     public function validate(Request $request, string $uuid)
     {
-        $validator = Validator::make($request->all(), [
-            'code' => 'required|digits:4',
-        ]);
-
+        $validator = Validator::make($request->all(), ['code' => 'required|digits:4']);
         if ($validator->fails()) {
             return $this->sendError('Error de validacion.', $validator->errors(), 422);
         }
-
-        try {
-            $verification = VerificationCodeUser::whereKey($uuid)
-                ->where('type', self::PASSWORD_RECOVERY_TYPE)
-                ->first();
-
-            if ($verification === null) {
-                return $this->sendError('La solicitud de recuperacion no es valida.', [], 422);
-            }
-            if ($verification->state) {
+        return $this->withRecovery($uuid, function ($verification, $user, $pending) use ($request) {
+            if (!isset($pending['code_hash'])) {
                 return $this->sendError('Este codigo ya fue utilizado.', [], 422);
             }
-            if ($verification->created_at->lt(now()->subMinutes(self::PASSWORD_RECOVERY_TTL_MINUTES))) {
-                $verification->update(['state' => true]);
-                return $this->sendError('El codigo ha expirado. Solicite uno nuevo.', [], 422);
+            $pending['attempts']++;
+            if (!hash_equals($pending['code_hash'], $this->digest($verification->id.':'.$request->code))) {
+                if ($pending['attempts'] >= 5) {
+                    $verification->update(['state' => true]);
+                    Cache::forget($this->recoveryKey($verification->id));
+                } else {
+                    $this->putRecovery($verification->id, $pending);
+                }
+                return $this->sendError('Codigo incorrecto. Maximo 5 intentos por solicitud.', [], 422);
             }
-            if (!hash_equals((string) $verification->code, (string) $request->code)) {
-                return $this->sendError('El codigo es incorrecto.', [], 422);
-            }
-
-            $user = User::find($verification->user_id);
-            if ($user === null) {
-                $verification->update(['state' => true]);
-                return $this->sendError('La cuenta asociada ya no existe.', [], 422);
-            }
-
-            $newPassword = Str::password(12);
-            DB::transaction(function () use ($user, $verification, $newPassword): void {
-                $user->update(['password' => bcrypt($newPassword)]);
-                $verification->update(['state' => true]);
-                DB::table('oauth_access_tokens')
-                    ->where('user_id', $user->id)
-                    ->update(['revoked' => true]);
-            });
-
-            Mail::to($user->email)->send(new PasswordUserMail([
-                'url' => env('APP_URL_FRONT') . '/auth/login',
-                'customer_name' => $user->name,
-                'password' => $newPassword,
-            ]));
-
-            return $this->sendResponse([], 'Cuenta recuperada. Revise su correo para obtener la nueva contrasena.');
-        } catch (Exception $e) {
-            return $this->sendError($e->getMessage());
-        }
+            $token = bin2hex(random_bytes(32));
+            unset($pending['code_hash']);
+            $pending['token_hash'] = hash('sha256', $token);
+            $pending['expires_at'] = now()->addMinutes(5)->timestamp;
+            $this->putRecovery($verification->id, $pending);
+            return $this->sendResponse([
+                'validation' => $verification->id,
+                'recovery_token' => $token,
+                'expires_in' => 300,
+            ], 'Codigo verificado. Ingrese su nueva contrasena.')->header('Cache-Control', 'no-store');
+        });
     }
 
-    public function recover(Request $request )
+    public function resetPassword(Request $request)
     {
-        try {
-            if (is_string($request->input('email'))) {
-                $request->merge(['email' => Str::lower(trim($request->string('email')->toString()))]);
+        $validator = Validator::make($request->all(), [
+            'validation' => 'required|uuid',
+            'recovery_token' => 'required|string|size:64|regex:/\A[a-f0-9]{64}\z/',
+            'password' => ['required', 'string', 'min:8', 'confirmed', Password::defaults()],
+            'password_confirmation' => 'required|string',
+        ]);
+        if ($validator->fails()) {
+            return $this->sendError('Error de validacion.', $validator->errors(), 422);
+        }
+        return $this->withRecovery($request->validation, function ($verification, $user, $pending) use ($request) {
+            if (!isset($pending['token_hash']) || !hash_equals($pending['token_hash'], hash('sha256', $request->recovery_token))) {
+                return $this->sendError('La autorizacion no es valida.', [], 422);
             }
+            $user->forceFill(['password' => Hash::make($request->password), 'remember_token' => Str::random(60)])->save();
+            $verification->update(['state' => true]);
+            $tokens = DB::table('oauth_access_tokens')->where('user_id', $user->id);
+            DB::table('oauth_refresh_tokens')->whereIn('access_token_id', (clone $tokens)->select('id'))->update(['revoked' => true]);
+            $tokens->update(['revoked' => true]);
+            Cache::forget($this->recoveryKey($verification->id));
+            return $this->sendResponse([], 'Contrasena actualizada. Ya puede iniciar sesion.');
+        });
+    }
 
-            $validator = Validator::make($request->all(), [
-                'email'     => 'required|email',
-            ]);
-
-            if ($validator->fails()) return $this->sendError('Error de validacion.', $validator->errors(), 422);
-
-            $userCurrent = User::where('email', $request->email)->first();
-
-            if ($userCurrent === null) {
+    public function recover(Request $request)
+    {
+        if (is_string($request->input('email'))) {
+            $request->merge(['email' => Str::lower(trim($request->string('email')->toString()))]);
+        }
+        $validator = Validator::make($request->all(), ['email' => 'required|email']);
+        if ($validator->fails()) {
+            return $this->sendError('Error de validacion.', $validator->errors(), 422);
+        }
+        try {
+            $this->requireRecoveryCache();
+            $user = User::where('email', $request->email)->first();
+            if (!$user) {
                 return $this->sendResponse([], 'Si el correo esta registrado, recibira un codigo de recuperacion.');
             }
-
-            $codeGenerator = new CodeGenerator();
-
-            $validation = DB::transaction(function () use ($userCurrent, $codeGenerator) {
-                VerificationCodeUser::where('user_id', $userCurrent->id)
-                    ->where('type', self::PASSWORD_RECOVERY_TYPE)
-                    ->where('state', false)
-                    ->update(['state' => true]);
-
-                return VerificationCodeUser::create([
-                    'user_id' => $userCurrent->id,
-                    'type' => self::PASSWORD_RECOVERY_TYPE,
-                    'code' => $codeGenerator->generate(),
+            return DB::transaction(function () use ($user) {
+                $user = User::whereKey($user->id)->lockForUpdate()->firstOrFail();
+                // Database history enforces resend limits even after cache eviction.
+                $requests = VerificationCodeUser::where('user_id', $user->id)->where('type', self::PASSWORD_RECOVERY_TYPE);
+                if ((clone $requests)->where('created_at', '>', now()->subMinute())->exists() ||
+                    (clone $requests)->where('created_at', '>', now()->subHour())->count() >= 5) {
+                    return $this->sendError('Espere para reenviar. Maximo 5 solicitudes por hora.', [], 429);
+                }
+                $requests->where('state', false)->update(['state' => true]);
+                $code = (new CodeGenerator())->generate();
+                // CHAR(4) contains a non-secret marker, never the actual code.
+                $verification = VerificationCodeUser::create([
+                    'user_id' => $user->id, 'type' => self::PASSWORD_RECOVERY_TYPE,
+                    'code' => '----', 'state' => false,
                 ]);
+                $this->putRecovery($verification->id, [
+                    'user_id' => $user->id,
+                    'code_hash' => $this->digest($verification->id.':'.$code),
+                    'attempts' => 0,
+                    'expires_at' => now()->addMinutes(self::PASSWORD_RECOVERY_TTL_MINUTES)->timestamp,
+                ]);
+                Mail::to($user->email)->send(new CreateUserMail([
+                    'url' => env('APP_URL_FRONT').'/auth/verification-code/'.$verification->id,
+                    'customer_name' => $user->name, 'code' => $code,
+                ]));
+                return $this->sendResponse(['validation' => $verification->id], 'Codigo enviado.');
             });
-
-            $mailData = [
-                'url' => env('APP_URL_FRONT') . '/auth/verification-code/'.$validation->id,
-                'customer_name' => $userCurrent->name,
-                'code' => $validation->code
-            ];
-
-            Mail::to($userCurrent->email)->send(new CreateUserMail($mailData));
-
-            $success['validation'] = $validation->id;
-
-            return $this->sendResponse( $success , "");
-
-        }catch (Exception $e) {
-            return $this->sendError( $e->getMessage() );
+        } catch (\Throwable $e) {
+            return $this->sendError('No se pudo enviar el codigo. Intente nuevamente.', [], 503);
         }
     }
-
 }
