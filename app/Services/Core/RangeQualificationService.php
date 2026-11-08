@@ -31,7 +31,8 @@ class RangeQualificationService
         $this->networkCodesCache = [];
         $rules = RangeRule::with(['range', 'requirements.requiredRange'])
             ->where('state', true)->get()->sortBy('range.order')->values();
-        $users = User::where('is_admin', false)->orWhere('uuid', 'DOSB')->get();
+        $rootUuid = app(CorporateRootService::class)->uuid();
+        $users = User::where('is_admin', false)->orWhere('uuid', $rootUuid)->get();
         [$from, $to] = app(ActivationService::class)->visiblePeriod();
         $isGracePeriod = app(ActivationService::class)->isMonthlyGracePeriod();
         $groupPoints = PaymentOrderPoint::whereIn('type', [PaymentOrderPoint::COMPRA, PaymentOrderPoint::GRUPAL])
@@ -90,7 +91,7 @@ class RangeQualificationService
     public function qualifies(User $user, RangeRule $rule, float $groupPoints): bool
     {
         // La cuenta corporativa asciende solo por volumen, sin requisitos de red.
-        if (strcasecmp((string) $user->uuid, 'DOSB') === 0) {
+        if (app(CorporateRootService::class)->isRootCode($user->uuid)) {
             return $groupPoints >= $rule->required_points;
         }
 

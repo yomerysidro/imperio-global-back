@@ -9,6 +9,7 @@ use App\Models\User;
 use App\Models\PaymentLog;
 use App\Models\PaymentProductOrder;
 use App\Models\PaymentOrderPoint;
+use App\Models\SponsorRelation;
 use App\Models\PaymentProductOrderPoint;
 use App\Services\Core\Calculator;
 use App\Services\Core\NetworkTreeService;
@@ -135,19 +136,6 @@ class PaymentOrderPointController extends BaseController
                 }
             }
 
-            // Sincronizar estado en BD para consistencia
-            if ($ultimoPago && !$isGracePeriod) {
-                $nuevoEstado = $isActive ? PaymentLog::PAGADO : PaymentLog::TERMINADO;
-
-                if ($ultimoPago instanceof PaymentLog) {
-                    PaymentLog::where('id', $ultimoPago->id)->update(['state' => $nuevoEstado]);
-                    $ultimoPago->state = $nuevoEstado;
-                } elseif ($ultimoPago instanceof PaymentProductOrder) {
-                    PaymentProductOrder::where('id', $ultimoPago->id)->update(['state' => $nuevoEstado]);
-                    $ultimoPago->state = $nuevoEstado;
-                }
-            }
-
             $userModel->payment = $ultimoPago;
             $userModel->active = $isActive;
             $userModel->estado_visual = $estadoVisual;
@@ -158,6 +146,12 @@ class PaymentOrderPointController extends BaseController
                 $this->networkTreeService->getAllNetworkUsers($userModel->uuid),
                 fn ($code) => strcasecmp($code, $userModel->uuid) !== 0
             ));
+            $currentParents = SponsorRelation::whereIn('user_code', $allDownlineCodes)
+                ->where('state', true)->pluck('sponsor_code', 'user_code');
+            $parentByChild = [];
+            foreach ($currentParents as $childCode => $parentCode) {
+                $parentByChild[strtoupper((string) $childCode)] = $parentCode;
+            }
 
             $rawNetworkPoints = PaymentOrderPoint::with(['userPoint.file', 'userPoint.paymentActive', 'sponsor'])
                 ->whereIn('user_code', $allDownlineCodes)
@@ -216,8 +210,12 @@ class PaymentOrderPointController extends BaseController
             $combinedPoints = $allPointsTable->merge($historicalCommissions);
 
             // TRANSFORMACIÓN DE NODOS
-            $networkPoints->transform(function ($item) use ($allPointsTable, $allProductPoints, $activation) {
+            $networkPoints->transform(function ($item) use ($allPointsTable, $allProductPoints, $activation, $parentByChild) {
                 $item->user = $item->userPoint;
+                // Financial point rows retain their historical sponsor snapshot.
+                // Tree edges always come from the current active genealogy.
+                $item->sponsor_code = $parentByChild[strtoupper((string) $item->user_code)] ?? null;
+                $item->parent_uuid = $item->sponsor_code;
 
                 // Verificar si está activo en el ciclo actual
                 $hasBoughtThisCycle = $item->userPoint
@@ -295,7 +293,47 @@ class PaymentOrderPointController extends BaseController
                 );
             }
 
-            return $this->sendResponse(["points" => $networkPoints, "user" => $userModel], 'Éxito');
+            $pointsByCode = $networkPoints->keyBy(fn ($item) => strtoupper((string) $item->user_code));
+            $childrenByParent = [];
+            foreach ($parentByChild as $childCode => $parentCode) {
+                $childrenByParent[strtoupper((string) $parentCode)][] = $childCode;
+            }
+            $buildNode = function (string $code, array $path = []) use (&$buildNode, $pointsByCode, $childrenByParent): ?array {
+                $key = strtoupper($code);
+                if (isset($path[$key])) return null;
+                $item = $pointsByCode->get($key);
+                if (!$item) return null;
+                $path[$key] = true;
+                $node = $item->toArray();
+                $node['uuid'] = $item->user_code;
+                $node['parent_uuid'] = $item->sponsor_code;
+                $node['children'] = [];
+                foreach ($childrenByParent[$key] ?? [] as $childCode) {
+                    $childNode = $buildNode($childCode, $path);
+                    if ($childNode !== null) $node['children'][] = $childNode;
+                }
+                $node['has_children'] = count($node['children']) > 0;
+                return $node;
+            };
+            $root = [
+                'uuid' => $userModel->uuid, 'user_code' => $userModel->uuid,
+                'parent_uuid' => null, 'name' => $userModel->name,
+                'children' => [], 'has_children' => count($this->networkTreeService->directUserCodes($userModel->uuid)) > 0,
+            ];
+            foreach ($childrenByParent[strtoupper($userModel->uuid)] ?? [] as $childCode) {
+                $childNode = $buildNode($childCode);
+                if ($childNode !== null) $root['children'][] = $childNode;
+            }
+
+            return $this->sendResponse([
+                'points' => $networkPoints->values(), 'user' => $userModel,
+                'network_tree' => $root,
+                'network_meta' => [
+                    'source' => 'sponsor_relations', 'total_directs' => count($childrenByParent[strtoupper($userModel->uuid)] ?? []),
+                    'total_network' => count($allDownlineCodes), 'returned_nodes' => $pointsByCode->count(),
+                    'complete' => $pointsByCode->count() === count($allDownlineCodes),
+                ],
+            ], 'Éxito');
         } catch (Exception $e) {
             return $this->sendError($e->getMessage());
         }

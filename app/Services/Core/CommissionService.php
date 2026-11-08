@@ -13,6 +13,7 @@ use App\Models\SponsorRelation;
 use App\Models\PaymentProductOrder;
 use App\Models\CommissionRule;
 use App\Models\ManualReactivation;
+use Illuminate\Support\Facades\DB;
 
 class CommissionService
 {
@@ -25,14 +26,30 @@ class CommissionService
 
     public function confirmPoint($paymentOrder, $userCurrent, $packCurrent, $reactiveAdmin = false)
     {
-        if (!empty($paymentOrder->sponsor_code)
-            && strcasecmp($paymentOrder->sponsor_code, $userCurrent->uuid) !== 0
-            && User::where('uuid', $paymentOrder->sponsor_code)->exists()) {
-            SponsorRelation::firstOrCreate(
-                ['user_code' => $userCurrent->uuid],
-                ['sponsor_code' => $paymentOrder->sponsor_code, 'source' => 'purchase', 'state' => true]
-            );
+        if (DB::transactionLevel() === 0) {
+            return DB::transaction(function () use ($paymentOrder, $userCurrent, $packCurrent, $reactiveAdmin) {
+                $this->confirmPoint($paymentOrder, $userCurrent, $packCurrent, $reactiveAdmin);
+            }, 3);
         }
+        $this->networkTreeService->lockRootForMutation();
+
+        // A confirmation retry after a genealogy move must not append newly
+        // eligible beneficiaries to an earlier distribution. Successful
+        // generation is transactional; existing commission rows therefore
+        // mean this order has already started settlement and is immutable.
+        $existingDistribution = PaymentOrderPoint::where('payment_order_id', $paymentOrder->id)
+            ->whereIn('type', [
+                PaymentOrderPoint::PATROCINIO, PaymentOrderPoint::PATROCINIO_SERVICIO,
+                PaymentOrderPoint::RESIDUAL, PaymentOrderPoint::RESIDUAL_SERVICIO,
+                PaymentOrderPoint::INFINITO, PaymentOrderPoint::GRUPAL,
+            ])->exists();
+        if ($existingDistribution) return;
+
+
+        // PaymentOrder keeps the sponsor selected when the order was created
+        // for historical traceability. The active relation is authoritative
+        // for commissions calculated now, especially after a branch move.
+        $currentSponsorCode = $this->networkTreeService->sponsorCode($userCurrent->uuid, true);
 
         if (!$reactiveAdmin) {
             $existingPersonal = PaymentOrderPoint::where('payment_order_id', $paymentOrder->id)
@@ -43,7 +60,7 @@ class CommissionService
                 PaymentOrderPoint::create([
                     'payment_order_id' => $paymentOrder->id,
                     'user_code'        => $userCurrent->uuid,
-                    'sponsor_code'     => $paymentOrder->sponsor_code,
+                    'sponsor_code'     => $currentSponsorCode ?? '',
                     'point'            => $packCurrent->points,
                     'payment'          => 1,
                     'type'             => PaymentOrderPoint::COMPRA,
@@ -63,7 +80,6 @@ class CommissionService
             ->exists();
 
         $debeGenerarBono      = !$existingPackSameCategory;
-        $currentSponsorCode   = $paymentOrder->sponsor_code;
         $level                = 1;
         // Base única del plan: puntos configurados en el paquete adquirido.
         // Nunca usar price, amount ni subtotal para calcular patrocinio.
@@ -83,7 +99,7 @@ class CommissionService
             $sponsorUser = User::where('uuid', $currentSponsorCode)->first();
             if (!$sponsorUser) break;
             $isCompanySponsor = $sponsorUser->is_admin
-                || strcasecmp((string) $sponsorUser->uuid, 'DOSB') === 0;
+                || app(CorporateRootService::class)->isRootCode($sponsorUser->uuid);
 
             $sponsorPack = null;
 
@@ -202,6 +218,24 @@ class CommissionService
         string $category = 'product'
     ): array
 {
+    if (DB::transactionLevel() === 0) {
+        return DB::transaction(fn () => $this->confirmPointAfiliado(
+            $userCurrent, $points, $manualReactivationId, $paymentOrderId, $category
+        ), 3);
+    }
+    $this->networkTreeService->lockRootForMutation();
+
+    // A residual stream is calculated as one transaction against one locked
+    // genealogy. A callback retry after a move is a no-op, never a second pass
+    // that could combine old and current beneficiaries.
+    if ($paymentOrderId && PaymentOrderPoint::where('payment_order_id', $paymentOrderId)
+        ->whereIn('type', [PaymentOrderPoint::RESIDUAL, PaymentOrderPoint::RESIDUAL_SERVICIO, PaymentOrderPoint::INFINITO])
+        ->exists()) {
+        return ['generated_count' => 0, 'generated_amount' => 0.0, 'blocked' => [
+            ['reason' => 'distribution_already_started'],
+        ]];
+    }
+
     $summary = ['generated_count' => 0, 'generated_amount' => 0.0, 'blocked' => []];
     $category = strtolower(trim($category));
     if (!in_array($category, ['product', 'service'], true)) {
@@ -239,7 +273,7 @@ class CommissionService
     }
 
             // 🔥 OBTENER EL ÁRBOL COMPLETO DEL USUARIO (línea ascendente)
-            $_paymentOrderPoints = $this->networkTreeService->loopTree([], $userCurrent->uuid);
+            $_paymentOrderPoints = $this->networkTreeService->loopTree([], $userCurrent->uuid, true);
             $policy = new ResidualCommissionPolicy();
             $countLevel          = 0;
 
@@ -252,7 +286,7 @@ class CommissionService
                 $beneficiary = User::where('uuid', $beneficiaryCode)->first();
                 $isCompany = $beneficiary && (
                     $beneficiary->is_admin
-                    || strcasecmp((string) $beneficiary->uuid, 'DOSB') === 0
+                    || app(CorporateRootService::class)->isRootCode($beneficiary->uuid)
                 );
                 $beneficiaryRangeOrder = (int) ($beneficiary?->range?->range?->order ?? 0);
                 $isActive = $beneficiary

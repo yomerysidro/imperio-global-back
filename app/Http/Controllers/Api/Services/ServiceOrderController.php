@@ -12,6 +12,7 @@ use Illuminate\Support\Facades\Auth;
 use Illuminate\Support\Facades\DB;
 use App\Services\Core\Services\ServiceTreeManager;
 use App\Services\Core\CommissionService;
+use App\Services\Core\NetworkTreeService;
 
 class ServiceOrderController extends BaseController
 {
@@ -26,7 +27,15 @@ class ServiceOrderController extends BaseController
 
         DB::beginTransaction();
         try {
-            // BUSCAR EL SPONSOR ORIGINAL
+            $network = app(NetworkTreeService::class);
+            $network->lockRootForMutation();
+            $currentSponsorCode = $network->sponsorCode($user->uuid, true);
+            if (!$currentSponsorCode) {
+                DB::rollBack();
+                return $this->sendError('No se puede crear el pedido: el socio no tiene patrocinador genealógico vigente.', [], 422);
+            }
+
+            // Verificar que el usuario tenga una compra inicial confirmada.
             $originalOrder = PaymentOrder::whereHas('paymentLog', function ($q) use ($user) {
                 $q->where('user_id', $user->id)->where('state', 2);
             })->first();
@@ -39,7 +48,7 @@ class ServiceOrderController extends BaseController
             $order = PaymentOrder::create([
                 'currency' => 'PEN',
                 'amount' => $pack->price,
-                'sponsor_code' => $originalOrder->sponsor_code,
+                'sponsor_code' => $currentSponsorCode,
                 'pack_id' => $pack->id,
                 'token' => 'SERVICE-' . uniqid()
             ]);
@@ -58,7 +67,7 @@ class ServiceOrderController extends BaseController
             PaymentOrderPoint::create([
                 'payment_order_id' => $order->id,
                 'user_code' => $user->uuid,
-                'sponsor_code' => $originalOrder->sponsor_code,
+                'sponsor_code' => $currentSponsorCode,
                 'point' => $pack->points, // Aquí van los 80 puntos
                 'payment' => true,
                 'type' => PaymentOrderPoint::COMPRA, // Usamos el tipo 'B' existente

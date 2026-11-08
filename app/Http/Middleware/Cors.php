@@ -16,11 +16,22 @@ class Cors
      */
     public function handle(Request $request, Closure $next)
     {
-        $response = $next($request);
+        $origin = $request->headers->get('Origin');
+        $allowed = array_filter(array_map('trim', explode(',', (string) config('app.frontend_origins', 'http://localhost:4200'))));
+        $isAllowed = $origin !== null && in_array($origin, $allowed, true);
 
-        $response->headers->set('Access-Control-Allow-Origin', '*');
+        if ($request->isMethod('OPTIONS')) {
+            $response = response('', 204);
+        } else {
+        $response = $next($request);
+        }
+
+        if ($isAllowed) {
+            $response->headers->set('Access-Control-Allow-Origin', $origin);
+            $response->headers->set('Vary', 'Origin');
+            $response->headers->set('Access-Control-Allow-Credentials', 'true');
+        }
         $response->headers->set('Access-Control-Allow-Methods', 'POST, GET, OPTIONS, PUT, DELETE');
-        $response->headers->set('Access-Control-Allow-Credentials', 'true');
         $response->headers->set('Access-Control-Allow-Headers', 'Content-Type, X-Auth-Token, Origin, Authorization');
         $response->headers->set('Accept-Language', 'en');
 

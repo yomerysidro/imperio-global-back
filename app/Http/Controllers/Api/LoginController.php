@@ -39,7 +39,7 @@ class LoginController extends BaseController
         ])->first();
 
         $network = new NetworkTreeService();
-        if (!$sponsor || !$network->belongsToNetwork('DOSB', $sponsor->uuid)) {
+        if (!$sponsor || !$network->belongsToNetwork(app(\App\Services\Core\CorporateRootService::class)->uuid(), $sponsor->uuid)) {
             return $this->sendError(
                 'El codigo de patrocinador no es valido.',
                 ['code' => ['El patrocinador no existe o no pertenece a la organizacion.']],
@@ -92,7 +92,7 @@ class LoginController extends BaseController
         $validator = Validator::make($request->all(), [
             'name'     => 'required',
             'email'    => 'required|email',
-            'dni'      => 'required',
+            'dni'      => 'required|string|max:100',
             'password' => 'required|min:8',
             'sponsor_code' => 'required|string|exists:users,uuid',
         ]);
@@ -105,7 +105,7 @@ class LoginController extends BaseController
             ])->first();
 
             $network = new NetworkTreeService();
-            if (!$sponsor || !$network->belongsToNetwork('DOSB', $sponsor->uuid)) {
+            if (!$sponsor || !$network->belongsToNetwork(app(\App\Services\Core\CorporateRootService::class)->uuid(), $sponsor->uuid)) {
                 return $this->sendError(
                     'El codigo de patrocinador no pertenece a la organizacion.',
                     ['sponsor_code' => ['El codigo de patrocinador no es valido.']],
@@ -122,6 +122,11 @@ class LoginController extends BaseController
             if(  $userExistDni != null ) return $this->sendError( "Este DNI ya existe" );
 
             DB::beginTransaction();
+            $network->lockRootForMutation();
+            $sponsor = User::whereRaw('UPPER(uuid) = ?', [strtoupper(trim((string) $request->sponsor_code))])->first();
+            if (!$sponsor || !$network->belongsToNetwork(app(\App\Services\Core\CorporateRootService::class)->uuid(), $sponsor->uuid)) {
+                throw new \RuntimeException('El patrocinador dejó de pertenecer a la red corporativa.');
+            }
 
             $user = User::create([
                 'name'     => $request->name,

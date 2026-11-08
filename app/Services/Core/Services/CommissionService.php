@@ -5,6 +5,7 @@ namespace App\Services\Core\Services;
 use App\Models\PaymentOrder;
 use App\Services\Core\CommissionService as CoreCommissionService;
 use App\Services\Core\NetworkTreeService;
+use Illuminate\Support\Facades\DB;
 
 /**
  * Adaptador para las órdenes de producto. Conserva el endpoint existente y
@@ -14,8 +15,13 @@ class CommissionService
 {
     public function distribute($productOrder, $user, $pack): void
     {
+        if (DB::transactionLevel() === 0) {
+            DB::transaction(fn () => $this->distribute($productOrder, $user, $pack), 3);
+            return;
+        }
         $network = new NetworkTreeService();
-        $sponsorCode = $network->sponsorCode($user->uuid);
+        $network->lockRootForMutation();
+        $sponsorCode = $network->sponsorCode($user->uuid, true);
         if (!$sponsorCode) return;
 
         $order = PaymentOrder::firstOrCreate(

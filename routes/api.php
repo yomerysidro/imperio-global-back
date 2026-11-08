@@ -17,6 +17,8 @@ use App\Http\Controllers\Api\RangeController;
 use App\Http\Controllers\Api\CollectionRequestPatrocinioUserController;
 use App\Http\Controllers\Api\Services\ServiceOrderController;
 use App\Http\Controllers\Api\MlmRuleController;
+use App\Http\Controllers\Api\NetworkBranchMoveController;
+use App\Http\Controllers\Api\NetworkGenealogyController;
 
 Route::prefix('v1')->group(function () {
 
@@ -46,6 +48,19 @@ Route::prefix('v1')->group(function () {
     // --- GRUPO PROTEGIDO ---
     Route::middleware('auth:api')->group(function () {
 
+        Route::prefix('admin/network/moves')->group(function () {
+            Route::get('status', [NetworkBranchMoveController::class, 'status']);
+            Route::post('preview', [NetworkBranchMoveController::class, 'preview']);
+            Route::post('confirm', [NetworkBranchMoveController::class, 'confirm']);
+        });
+        Route::get('admin/network/root', [NetworkGenealogyController::class, 'root']);
+        Route::get('admin/network/genealogy', [NetworkGenealogyController::class, 'index']);
+        Route::get('admin/network/genealogy/{userCode}/children', [NetworkGenealogyController::class, 'children']);
+        Route::get('admin/network/genealogy/{userCode}/ancestors', [NetworkGenealogyController::class, 'ancestors']);
+        Route::get('admin/network/genealogy/{userCode}/descendants', [NetworkGenealogyController::class, 'descendants']);
+        Route::get('admin/network/genealogy/{userCode}', [NetworkGenealogyController::class, 'show'])
+            ->where('userCode', '[A-Za-z0-9_-]+');
+
         // --- BLOQUE USUARIOS Y FINANZAS ---
         Route::prefix('users')->group(function () {
             
@@ -64,8 +79,8 @@ Route::prefix('v1')->group(function () {
             Route::get('cash-flow', [FinanceController::class, 'cashFlowFilter']);
             Route::get('commission-summary', [FinanceController::class, 'commissionSummary']);
             Route::get('payments/find-all', [FinanceController::class, 'paymentsAll']);
-            Route::post('change-sponsor', [FinanceController::class, 'changeSponsor']);
-            Route::post('change-sponsor-with-network', [FinanceController::class, 'changeSponsorWithNetwork']);
+            // The legacy sponsor endpoints are deliberately not exposed: they
+            // update financial snapshots and bypass preview/audit safeguards.
             Route::post('reset', [FinanceController::class, 'resetPoint']);
             Route::post('reset-all', [FinanceController::class, 'resetAll']);
             Route::post('reset-all-points', [FinanceController::class, 'resetAllPoint']);
