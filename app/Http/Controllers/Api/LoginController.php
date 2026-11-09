@@ -191,8 +191,63 @@ class LoginController extends BaseController
     private function requireRecoveryCache(): void
     {
         $driver = config('cache.stores.'.config('cache.default').'.driver');
+        if ($driver === 'file') {
+            $this->requireRecoveryFileCache();
+            return;
+        }
         if (!app()->environment('testing') && !in_array($driver, ['database', 'redis', 'memcached', 'dynamodb'], true)) {
             throw new \RuntimeException('Recovery requires persistent shared cache.');
+        }
+    }
+
+    private function requireRecoveryFileCache(): void
+    {
+        // This is an operator assertion: filesystem probes cannot detect whether
+        // other PHP workers or future deployments mount the same persistent disk.
+        if (config('password_recovery.file_cache_shared') !== true) {
+            throw new \RuntimeException('Recovery file cache requires persistent storage shared by all recovery workers.');
+        }
+
+        $settings = config('cache.stores.'.config('cache.default'));
+        foreach ([$settings['path'] ?? null, $settings['lock_path'] ?? $settings['path'] ?? null] as $path) {
+            if (!is_string($path) || !is_dir($path) || !is_writable($path)) {
+                throw new \RuntimeException('Recovery cache and lock directories must exist and be writable.');
+            }
+        }
+
+        $cache = Cache::store();
+        if (!$cache->getStore() instanceof \Illuminate\Cache\FileStore) {
+            throw new \RuntimeException('Recovery requires the configured file store.');
+        }
+        // A fresh repository must see the same data and contend for the same lock.
+        $peer = Cache::resolve(config('cache.default'));
+        $key = 'password-recovery:health:'.bin2hex(random_bytes(16));
+        $value = bin2hex(random_bytes(16));
+        $lock = $cache->lock($key.':lock', 10);
+        $contender = $peer->lock($key.':lock', 10);
+        $acquired = false;
+        try {
+            if (!$cache->put($key, $value, 10) || $peer->get($key) !== $value ||
+                !$peer->forget($key) || $cache->get($key) !== null) {
+                throw new \RuntimeException('Recovery file cache read/write/delete check failed.');
+            }
+            $acquired = $lock->get();
+            if (!$acquired || $contender->get()) {
+                throw new \RuntimeException('Recovery file cache lock exclusion check failed.');
+            }
+            if (!$lock->release()) {
+                throw new \RuntimeException('Recovery file cache lock release check failed.');
+            }
+            $acquired = false;
+            if (!$contender->get() || !$contender->release()) {
+                throw new \RuntimeException('Recovery file cache lock reacquisition check failed.');
+            }
+        } finally {
+            if ($acquired) {
+                $lock->release();
+            }
+            $contender->release();
+            $cache->forget($key);
         }
     }
 
