@@ -1,8 +1,10 @@
+
 name: Deploy Backend Imperio Global
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
+  workflow_dispatch:
 
 concurrency:
   group: imperio-backend-production
@@ -13,59 +15,61 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Código del Repositorio
-      uses: actions/checkout@v4
+      - name: Codigo del Repositorio
+        uses: actions/checkout@v4
 
-    - name: Despliegue Remoto por SSH en Contabo
-      uses: appleboy/ssh-action@v1.0.3
-      with:
-        host: '144.126.156.149'
-        username: 'root'
-        password: ${{ secrets.SSH_PASSWORD }}
-        port: 22
-        key_checking: false
-        script: |
-          # Detener el despliegue si falla Git, Composer o una migracion.
-          set -e
+      - name: Despliegue SSH en V2Networks
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: '205.234.243.127'
+          username: 'ubuntu'
+          password: ${{ secrets.V2_SSH_PASSWORD }}
+          port: 22
+          fingerprint: 'SHA256:NuevMHOTwobPmjHLMGNvJq/VM5J8G3TdXbGgVHjAAbg'
+          command_timeout: 15m
+          script: |
+            set -e
 
-          # 1. Moverse al directorio web contenedor
-          cd /var/www
-          
-          # 2. Clonar usando el nombre exacto del repositorio si la carpeta no existe
-          if [ ! -d "imperio-global-back" ]; then
-            git clone https://github.com/yomerysidro/imperio-global-back.git imperio-global-back
-          fi
-          
-          # 3. Entrar a la carpeta correcta y aplicar la excepción de Git
-          cd /var/www/imperio-global-back
-          git config --global --add safe.directory /var/www/imperio-global-back
-          
-          # 4. Forzar la actualización del código al último commit de main
-          git fetch --all
-          git reset --hard origin/main
-          
-          # 5. Mover el archivo .env de producción que respaldamos en la raíz
-          if [ ! -f ".env" ] && [ -f "/root/back_env_backup" ]; then
-            cp /root/back_env_backup /var/www/imperio-global-back/.env
-          fi
-          
-          # 6. Instalar dependencias de Laravel sin librerías de desarrollo
-          composer install --no-dev --optimize-autoloader --no-interaction
+            # 1. Ingresar al proyecto clonado
+            cd /home/ubuntu/apps/imperio-global-back
 
-          # Verificar el esquema existente sin aplicar migraciones ni recalculos.
-          php artisan optimize:clear
-          php artisan mlm:deployment-check --production --database=imperio_bd
+            # 2. Verificar el archivo de entorno
+            if [ ! -f .env ]; then
+              echo "ERROR: Falta configurar .env"
+              exit 1
+            fi
 
-          # 7. Este despliegue utiliza exclusivamente el esquema ya instalado.
-          
-          # 8. Sincronizar permisos de propiedad para Nginx sobre la nueva ruta
-          sudo chown -R www-data:www-data /var/www/imperio-global-back
-          sudo chmod 640 /var/www/imperio-global-back/.env
-          sudo chmod -R 775 /var/www/imperio-global-back/storage /var/www/imperio-global-back/bootstrap/cache
-          
-          # 9. Reconstruir las caches de Laravel sin reiniciar Nginx.
-          php artisan optimize:clear
+            # 3. Actualizar codigo desde main
+            git fetch origin main
+            git reset --hard origin/main
 
-          # 10. Generar las caches finales con el codigo actualizado.
-          php artisan optimize
-          php artisan queue:restart
+            # 4. Instalar dependencias Laravel
+            composer install \
+              --no-dev \
+              --optimize-autoloader \
+              --no-interaction \
+              --prefer-dist
+
+            # 5. Verificar el esquema existente
+            php artisan optimize:clear
+            php artisan mlm:deployment-check \
+              --production \
+              --database=imperio_bd
+
+            # 6. Permisos sin quitar propiedad a ubuntu
+            sudo chown -R ubuntu:www-data \
+              storage bootstrap/cache
+
+            sudo chmod -R ug+rwX \
+              storage bootstrap/cache
+
+            sudo chown ubuntu:www-data .env
+            sudo chmod 640 .env
+
+            # 7. Reconstruir caches
+            php artisan optimize
+
+            # 8. Reiniciar workers de Laravel
+            php artisan queue:restart
+
+            echo "Despliegue completado en V2Networks"
