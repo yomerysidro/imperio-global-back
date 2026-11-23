@@ -25,7 +25,7 @@ jobs:
           username: 'ubuntu'
           password: ${{ secrets.V2_SSH_PASSWORD }}
           port: 22
-          fingerprint: 'SHA256:NuevMHOTwobPmjHLMGNvJq/VM5J8G3TdXbGgVHjAAbg'
+          fingerprint: 'SHA256:zrXAwTBx3+1smpR+vc0Tjj78+jYk2gGitm4H/vxjos0'
           command_timeout: 15m
           script: |
             set -e
