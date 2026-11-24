@@ -6,7 +6,7 @@ use App\Mail\CreateUserMail;
 use App\Mail\PasswordUserMail;
 use App\Models\User;
 use App\Models\VerificationCodeUser;
-use Illuminate\Foundation\Testing\RefreshDatabase;
+use Illuminate\Foundation\Testing\DatabaseTransactions;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Mail;
@@ -15,7 +15,7 @@ use Tests\TestCase;
 
 class AccountSecurityTest extends TestCase
 {
-    use RefreshDatabase;
+    use DatabaseTransactions;
 
     public function test_public_password_reset_without_a_recovery_code_does_not_exist(): void
     {

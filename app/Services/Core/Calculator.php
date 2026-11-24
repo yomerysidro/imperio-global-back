@@ -129,7 +129,6 @@ class Calculator
                     (int) ($orderPoint->level ?? 0),
                     (int) ($orderPoint->manual_reactivation_id ?? 0)]);
                 if (!isset($processedGanancia[$key])) {
-                    $categoria = $this->resolvePackCategory($packId, $orderId);
                     if ($tipoFila === 'P') {
                         $patrocinioProducto += $valorFila;
                     } elseif (in_array($tipoFila, ['PS', 'S'], true)) {
@@ -148,7 +147,6 @@ class Calculator
                     (int) ($orderPoint->level ?? 0),
                     (int) ($orderPoint->manual_reactivation_id ?? 0)]);
                 if (!isset($processedGanancia[$key])) {
-                    $categoria = $this->resolvePackCategory($packId, $orderId);
                     if ($tipoFila === 'R') {
                         $residualProducto += $valorFila;
                     } elseif ($tipoFila === 'RS') {
@@ -224,6 +222,11 @@ class Calculator
     public function pointsTotal(string $userCode, $paymentOrderPoints, $paymentProductOrderPoints, $month = null, $year = null, bool $includeClosed = false): float
     {
         $result = $this->points($userCode, $paymentOrderPoints, $paymentProductOrderPoints, $month, $year, $includeClosed);
+        return $this->volumeTotal($result);
+    }
+
+    public function volumeTotal(object $result): float
+    {
         return (float) $result->pointGroup + (float) $result->personal;
     }
 

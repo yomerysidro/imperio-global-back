@@ -28,13 +28,14 @@ class NetworkGenealogyController extends Controller
             $query->where(fn ($q) => $q->where('name', 'like', '%'.$input['q'].'%')
                 ->orWhere('uuid', 'like', '%'.$input['q'].'%'));
         }
-        $page = $query->paginate($input['perPage'] ?? 50);
-        $page->through(function (User $user) use ($snapshot) {
+        $page = $query->paginate($input['perPage'] ?? 50, ['id', 'uuid', 'name', 'is_admin']);
+        $sponsors = $this->tree->sponsorCodes($page->getCollection()->pluck('uuid')->all());
+        $page->through(function (User $user) use ($snapshot, $sponsors) {
             $node = $snapshot['nodes'][strtoupper($user->uuid)] ?? null;
             return [
                 'uuid' => $user->uuid, 'name' => $user->name,
                 'active' => $user->active, 'package_name' => $user->package_name,
-                'sponsor_code' => $this->tree->sponsorCode($user->uuid),
+                'sponsor_code' => $sponsors->get(strtoupper($user->uuid)),
                 'level' => $node['level'] ?? null, 'connected' => $node !== null,
             ];
         });
@@ -68,7 +69,6 @@ class NetworkGenealogyController extends Controller
         abort_unless(Auth::user()?->is_admin, 403);
         $request->validate(['page' => 'sometimes|integer|min:1', 'perPage' => 'sometimes|integer|min:1|max:100']);
         $user = User::where('uuid', $userCode)->firstOrFail();
-        $snapshot = $this->tree->snapshotFromRoot($user->uuid);
         if ($mode === 'ancestors') {
             $codes = []; $seen = [strtoupper($user->uuid) => true]; $cursor = $user->uuid;
             while ($parent = $this->tree->sponsorCode($cursor)) {
@@ -77,17 +77,24 @@ class NetworkGenealogyController extends Controller
             }
         } else {
             $codes = $mode === 'children' ? $this->tree->directUserCodes($user->uuid)
-                : array_values(array_filter(array_column($snapshot['nodes'], 'user_code'), fn ($code) => strcasecmp($code, $user->uuid) !== 0));
+                : array_values(array_filter(
+                    array_column($this->tree->snapshotFromRoot($user->uuid)['nodes'], 'user_code'),
+                    fn ($code) => strcasecmp($code, $user->uuid) !== 0
+                ));
         }
-        $profiles = User::whereIn('uuid', $codes)->get()->keyBy(fn ($u) => strtoupper($u->uuid));
-        $rows = collect($codes)->map(function ($code) use ($profiles) {
+        $perPage = (int) $request->input('perPage', 50);
+        $page = (int) $request->input('page', 1);
+        $pageCodes = array_slice($codes, ($page - 1) * $perPage, $perPage);
+        $profiles = User::whereIn('uuid', $pageCodes)->get(['id', 'uuid', 'name', 'is_admin'])
+            ->keyBy(fn (User $profile) => strtoupper($profile->uuid));
+        $sponsors = $this->tree->sponsorCodes($pageCodes);
+        $rows = collect($pageCodes)->map(function ($code) use ($profiles, $sponsors) {
             $u = $profiles->get(strtoupper($code));
             return ['uuid' => $code, 'name' => $u?->name, 'active' => $u?->active,
-                'package_name' => $u?->package_name, 'sponsor_code' => $this->tree->sponsorCode($code)];
+                'package_name' => $u?->package_name, 'sponsor_code' => $sponsors->get(strtoupper($code))];
         });
-        $perPage = (int) $request->input('perPage', 50); $page = (int) $request->input('page', 1);
         return response()->json(new \Illuminate\Pagination\LengthAwarePaginator(
-            $rows->forPage($page, $perPage)->values(), $rows->count(), $perPage, $page
+            $rows, count($codes), $perPage, $page
         ));
     }
 

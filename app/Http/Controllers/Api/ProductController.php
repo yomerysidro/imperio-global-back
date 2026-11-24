@@ -23,7 +23,11 @@ class ProductController extends BaseController
         $query = Product::with('file_image')->orderByDesc('created_at');
         $this->applyCatalogVisibility($query, $user);
 
-        $products = $query->get()->map(fn (Product $product) => $this->catalogProduct($product, $user));
+        $products = $query->get();
+        if ($products->isNotEmpty()) {
+            $discount = $this->discountFor($user);
+            $products = $products->map(fn (Product $product) => $this->catalogProduct($product, $discount));
+        }
         return $this->sendResponse($products, 'Productos obtenidos correctamente.');
     }
 
@@ -35,7 +39,7 @@ class ProductController extends BaseController
             return $this->sendError('Producto no encontrado.', [], 404);
         }
 
-        return $this->sendResponse($this->catalogProduct($product, $user), 'Producto obtenido correctamente.');
+        return $this->sendResponse($this->catalogProduct($product, $this->discountFor($user)), 'Producto obtenido correctamente.');
     }
 
     public function store(Request $request)
@@ -240,9 +244,8 @@ class ProductController extends BaseController
         return now()->between($product->promotion_start_at, $product->promotion_end_at, true);
     }
 
-    private function catalogProduct(Product $product, ?User $user): Product
+    private function catalogProduct(Product $product, float $discount): Product
     {
-        $discount = $this->discountFor($user);
         $publicPrice = round((float) $product->price, 2);
         $product->setAttribute('public_price', $publicPrice);
         $product->setAttribute('discount_percentage', $discount);

@@ -36,7 +36,6 @@ use Illuminate\Support\Str;
 use App\Mail\InivitedSponsorUser;
 use App\Services\Core\CodeGenerator;
 use App\Models\VerificationCodeUser;
-use App\Models\SponsorRelation;
 use App\Models\ManualReactivation;
 use App\Services\Core\RangeQualificationService;
 use App\Services\Core\UserNetworkDeletionService;
@@ -270,7 +269,7 @@ class UserController extends BaseController
 {
     try {
         $user_id   = Auth::id();
-        $userModel = User::with(['file', 'range.range.file'])->select("*", "created_at as creatxlssed")->find($user_id);
+        $userModel = User::with('file')->select("*", "created_at as creatxlssed")->find($user_id);
 
         if (!$userModel) return $this->sendError("Usuario no encontrado");
 
@@ -280,9 +279,9 @@ class UserController extends BaseController
         $mesAnterior   = $now->copy()->subMonth();
         $isGracePeriod = app(\App\Services\Core\ActivationService::class)->isMonthlyGracePeriod($now);
 
-        $servicePayment = PaymentLog::with(['paymentOrder.pack'])
+        $servicePayment = PaymentLog::query()
             ->where("user_id", $user_id)->whereIn('state', [PaymentLog::PAGADO, PaymentLog::TERMINADO])->orderBy('created_at', 'desc')->first();
-        $productPayment = PaymentProductOrder::with(['pack', 'details.product'])
+        $productPayment = PaymentProductOrder::query()
             ->where("user_id", $user_id)->whereIn('state', [PaymentProductOrder::PAGADO, PaymentProductOrder::ENVIADO, PaymentProductOrder::TERMINADO])->orderBy('created_at', 'desc')->first();
 
         $ultimoPago = collect([$servicePayment, $productPayment])->filter()->sortByDesc('created_at')->first();
@@ -339,8 +338,7 @@ class UserController extends BaseController
 
         $isActive = app(\App\Services\Core\ActivationService::class)->isActive($userModel);
         $userModel->payment      = $this->displayPaymentPayload($displayPayment, $isActive);
-        $userModel->package_name = $userModel->package_name;
-        $userModel->active       = $isActive;
+        $packageName = $userModel->package_name;
 
         // La cuenta corporativa debe mostrar el mismo ciclo visible que el
         // resto del sistema. Durante la gracia ese ciclo es el mes anterior,
@@ -353,7 +351,8 @@ class UserController extends BaseController
 
         // 🔥 CORRECCIÓN 1: OBTENER TODOS LOS PUNTOS ACTIVOS (state = 1) DEL MES FILTRADO
         // Incluimos todos los tipos: B, G, R, P, S, I
-        $paymentOrderPoints = PaymentOrderPoint::query()
+        $paymentOrderPointsUser = PaymentOrderPoint::query()
+            ->whereRaw('UPPER(user_code) = ?', [strtoupper($userModel->uuid)])
             ->when(!$isGracePeriod, fn ($query) => $query->where('state', 1))
             ->whereMonth('created_at', $mesFiltro)
             ->whereYear('created_at', $anioFiltro)
@@ -362,10 +361,6 @@ class UserController extends BaseController
         // El Home muestra solo las ganancias del periodo seleccionado.
         // El historial permanece disponible en los reportes financieros.
 
-        // 🔥 CORRECCIÓN 2: FILTRAR SOLO LOS PUNTOS DEL USUARIO ACTUAL
-        $paymentOrderPointsUser = $paymentOrderPoints->filter(function ($point) use ($userModel) {
-            return strtoupper($point->user_code) == strtoupper($userModel->uuid);
-        })->values();
 
         // 🔥 CORRECCIÓN 3: CALCULAR PUNTOS POR TIPO (Todos los tipos)
         $puntosPersonales = $paymentOrderPointsUser->where('type', 'B')->sum('point'); // COMPRA
@@ -404,32 +399,9 @@ class UserController extends BaseController
         $legacyTokens = collect();
 
         // 🔥 CORRECCIÓN 5: LÓGICA PARA la raíz corporativa (CORPORATIVO)
+        $descendantCodes = null;
         if (app(\App\Services\Core\CorporateRootService::class)->isRootCode($userModel->uuid)) {
-            $directosLegacy = $this->networkTreeService->directUserCodes($userModel->uuid);
-
-            $userModel->directos = count($directosLegacy);
-            $activos = 0;
-            foreach ($directosLegacy as $guestCode) {
-                $user = User::where('uuid', $guestCode)->first();
-                if ($user) {
-                    $hasPayment = PaymentLog::where('user_id', $user->id)
-                        ->whereIn('state', [PaymentLog::PAGADO])
-                        ->whereMonth('created_at', $now->month)
-                        ->whereYear('created_at', $now->year)
-                        ->exists();
-                    $hasProduct = PaymentProductOrder::where('user_id', $user->id)
-                        ->whereIn('state', [PaymentProductOrder::PAGADO, PaymentProductOrder::ENVIADO])
-                        ->whereMonth('created_at', $now->month)
-                        ->whereYear('created_at', $now->year)
-                        ->exists();
-                    if ($hasPayment || $hasProduct) $activos++;
-                }
-            }
-            $networkUsers = $this->networkTreeService->getAllNetworkUsers(app(\App\Services\Core\CorporateRootService::class)->uuid());
-            $descendantCodes = array_values(array_filter(
-                $networkUsers,
-                fn ($code) => strcasecmp($code, app(\App\Services\Core\CorporateRootService::class)->uuid()) !== 0
-            ));
+            $descendantCodes = $this->networkTreeService->descendantCodes($userModel->uuid);
 
             $monthlyGroupVolume = DB::query()->fromSub(
                 PaymentOrderPoint::select('payment_order_id', DB::raw('MAX(point) as point'))
@@ -442,9 +414,6 @@ class UserController extends BaseController
                 'monthly_network_purchases'
             )->sum('point');
 
-            $userModel->activos = $activos;
-            $userModel->red_total = count($descendantCodes);
-            $userModel->personas_red = count($descendantCodes);
             // Se conserva la clave por compatibilidad con el frontend, pero
             // nunca se mezcla el acumulado historico con el periodo actual.
             $userModel->volumen_grupal_historico = (float) $monthlyGroupVolume;
@@ -475,33 +444,6 @@ class UserController extends BaseController
             ];
         } else {
             // 🔥 LÓGICA PARA USUARIOS NORMALES
-            $todosDirectos       = $this->networkTreeService->directUserCodes($userModel->uuid);
-            $userModel->directos = count($todosDirectos);
-
-            $activos = 0;
-            foreach ($todosDirectos as $directCode) {
-                $user = User::where('uuid', $directCode)->first();
-                if ($user) {
-                    $hasActivePayment = PaymentLog::where('user_id', $user->id)
-                        ->whereIn('state', [PaymentLog::PAGADO])
-                        ->whereMonth('created_at', $mesFiltro)
-                        ->whereYear('created_at', $anioFiltro)
-                        ->exists();
-                    $hasActiveProduct = PaymentProductOrder::where('user_id', $user->id)
-                        ->whereIn('state', [PaymentProductOrder::PAGADO, PaymentProductOrder::ENVIADO])
-                        ->whereMonth('created_at', $mesFiltro)
-                        ->whereYear('created_at', $anioFiltro)
-                        ->exists();
-                    if ($hasActivePayment || $hasActiveProduct) {
-                        $activos++;
-                    }
-                }
-            }
-            $userModel->activos = $activos;
-            $userModel->red_total = $this->networkTreeService->countTotalNetworkRecursive($userModel->uuid);
-            $userModel->personas_red = $userModel->red_total;
-
-            // 🔥 CORRECCIÓN: OBJETO DE PUNTOS CON TODOS LOS TIPOS
             $userModel->points = (object) [
                 'patrocinio'          => $gananciaPatrocinio, // Bono por reclutar (P + S)
                 'residual'            => $puntosResiduales,   // Bono residual (R)
@@ -527,7 +469,7 @@ class UserController extends BaseController
             ];
         }
 
-        $networkMetrics = app(\App\Services\Core\NetworkActivityMetrics::class)->forUser($userModel);
+        $networkMetrics = app(\App\Services\Core\NetworkActivityMetrics::class)->forUser($userModel, $descendantCodes);
         $userModel->directos = $networkMetrics['total_directs'];
         $userModel->directos_patrocinados = $networkMetrics['total_directs'];
         $userModel->directos_activos = $networkMetrics['total_directs_active'];
@@ -537,7 +479,7 @@ class UserController extends BaseController
         $userModel->totalPoints = $totalPoints;
 
         // Sincronizar el rango con el mismo volumen B + G que muestra el perfil.
-        app(RangeQualificationService::class)->recalculateUser($userModel);
+        app(RangeQualificationService::class)->recalculateUser($userModel, isActive: $isActive);
         $userModel->load('range.range.rule');
         $rangeCurrent = $userModel->range?->range;
         $nextRange = Range::where('state', true)
@@ -548,7 +490,10 @@ class UserController extends BaseController
             ? min(100, round(((float) $totalPoints / (float) $progressTarget->points) * 100, 2))
             : 0;
 
-        $responsePayload                    = $userModel->toArray();
+        $responsePayload = $userModel->setAppends([])->toArray() + [
+            'active' => $isActive,
+            'package_name' => $packageName,
+        ];
         // `points` conserva el resumen tipado que consume el home. Exponer los
         // movimientos aparte evita sumar comisiones R/P/I como volumen B/G.
         $responsePayload['point_records'] = $paymentOrderPointsUser->values()->toArray();
@@ -576,7 +521,7 @@ class UserController extends BaseController
             'bonos_totales'       => $gananciaPatrocinio + $puntosResiduales + $puntosInfinito,
             'ganancia_total'      => $gananciaPatrocinio + $puntosResiduales + $puntosInfinito,
             'total_puntos'        => $totalPoints,
-            'paquete_actual'      => $userModel->package_name ?? 'Sin paquete',
+            'paquete_actual'      => $packageName,
             'rango_actual'        => $rangeCurrent ? $rangeCurrent->title : 'Sin rango'
         ];
         $responsePayload['current_range'] = $rangeCurrent;
@@ -668,10 +613,7 @@ class UserController extends BaseController
             }
         }
 
-        $userList = User::with([
-            'file', 
-            'range.range.file'
-        ])->where('is_admin', false);
+        $userList = User::with('file')->where('is_admin', false);
 
         if ($request->has('code') && !empty($request->query('code'))) $userList = $userList->where("uuid", 'like', $request->query('code'));
         if ($request->has('email') && !empty($request->query('email'))) $userList = $userList->where("email", 'like', $request->query('email'));
@@ -686,14 +628,13 @@ class UserController extends BaseController
                     PaymentLog::PAGADO,
                     PaymentLog::TERMINADO,
                     PaymentLog::RESET,
-                ])->pluck('user_id');
+                ])->whereNotNull('user_id')->select('user_id');
                 $productOwners = PaymentProductOrder::whereIn('state', [
                     PaymentProductOrder::PAGADO,
                     PaymentProductOrder::ENVIADO,
                     PaymentProductOrder::TERMINADO,
-                ])->pluck('user_id');
-                $ownerIds = $serviceOwners->merge($productOwners)->filter()->unique()->values();
-                $userList = $userList->whereNotIn("id", $ownerIds);
+                ])->whereNotNull('user_id')->select('user_id');
+                $userList->whereNotIn('id', $serviceOwners->union($productOwners));
             } else {
                 $serviceOwners = PaymentLog::whereIn('state', [
                     PaymentLog::PAGADO,
@@ -701,18 +642,42 @@ class UserController extends BaseController
                     PaymentLog::RESET,
                 ])->whereHas("paymentOrder.pack", function ($q) use ($plan) {
                     $q->where('id', $plan);
-                })->pluck('user_id');
+                })->select('user_id');
                 $productOwners = PaymentProductOrder::whereIn('state', [
                     PaymentProductOrder::PAGADO,
                     PaymentProductOrder::ENVIADO,
                     PaymentProductOrder::TERMINADO,
-                ])->where('pack_id', $plan)->pluck('user_id');
-                $ownerIds = $serviceOwners->merge($productOwners)->filter()->unique()->values();
-                $userList = $userList->whereIn("id", $ownerIds);
+                ])->where('pack_id', $plan)->select('user_id');
+                $userList->whereIn('id', $serviceOwners->union($productOwners));
             }
         }
 
         $userList = $userList->orderBy('created_at', 'desc')->paginate($limit);
+
+        if ($userList->isEmpty()) {
+            return $this->sendResponse(new PaginationCollection($userList), 'Lista obtenida correctamente');
+        }
+
+        $pageUsers = collect($userList->items());
+        $userIds = $pageUsers->pluck('uuid')->all();
+        $normalizedUserCodes = array_map('strtoupper', $userIds);
+        $paginatedUserIds = $pageUsers->pluck('id')->all();
+        $ownedLogs = PaymentLog::with('paymentOrder:id,pack_id', 'paymentOrder.pack')
+            ->whereIn('user_id', $paginatedUserIds)
+            ->whereIn('state', [PaymentLog::PAGADO, PaymentLog::TERMINADO, PaymentLog::RESET])
+            ->orderBy('created_at')->get(['id', 'user_id', 'payment_order_id', 'state', 'created_at'])->groupBy('user_id');
+        $ownedOrders = PaymentProductOrder::with('pack')
+            ->whereIn('user_id', $paginatedUserIds)
+            ->whereIn('state', [PaymentProductOrder::PAGADO, PaymentProductOrder::ENVIADO, PaymentProductOrder::TERMINADO])
+            ->orderBy('created_at')->get(['id', 'user_id', 'pack_id', 'created_at'])->groupBy('user_id');
+        $latestLogs = $ownedLogs->map(fn ($logs) => $logs->sortByDesc('created_at')->first());
+        $latestOrders = $ownedOrders->map(fn ($orders) => $orders->sortByDesc('created_at')->first());
+        $displayLogs = PaymentLog::with('paymentOrder.pack')
+            ->whereKey($latestLogs->pluck('id')->all())->get()->keyBy('user_id');
+        $sponsorCodes = $this->networkTreeService->sponsorCodes($userIds);
+        $sponsors = User::whereIn(DB::raw('UPPER(uuid)'), $sponsorCodes
+            ->map(fn ($code) => strtoupper($code))->unique()->values()->all())->get(['uuid', 'name'])
+            ->keyBy(fn (User $sponsor) => strtoupper($sponsor->uuid));
 
         $now = Carbon::now('America/Lima');
         $currentMonth = $now->month;
@@ -721,26 +686,28 @@ class UserController extends BaseController
         $isGracePeriod = app(\App\Services\Core\ActivationService::class)->isMonthlyGracePeriod($now);
 
         // 🔥 Obtener TODOS los puntos activos del mes
-        $allPaymentOrderPoints = PaymentOrderPoint::with(['paymentOrder.pack'])
+        $allPaymentOrderPoints = PaymentOrderPoint::query()
             ->where('state', 1)
+            ->whereIn(DB::raw('UPPER(user_code)'), $normalizedUserCodes)
             ->whereMonth('created_at', $currentMonth)->whereYear('created_at', $currentYear)
-            ->get();
+            ->get()->groupBy(fn ($point) => strtoupper($point->user_code));
 
         $allProductOrderPoints = PaymentProductOrderPoint::where("state", true)
+            ->whereIn('user_id', $paginatedUserIds)
             ->whereMonth('created_at', $currentMonth)->whereYear('created_at', $currentYear)
-            ->get();
+            ->get()->groupBy('user_id');
 
         // 🔥 Puntos del mes anterior (período de gracia)
-        $allPaymentOrderPointsLastMonth = PaymentOrderPoint::with(['paymentOrder.pack'])
+        $allPaymentOrderPointsLastMonth = $isGracePeriod ? PaymentOrderPoint::query()
+            ->whereIn(DB::raw('UPPER(user_code)'), $normalizedUserCodes)
             ->whereMonth('created_at', $mesAnterior->month)->whereYear('created_at', $mesAnterior->year)
-            ->get();
+            ->get()->groupBy(fn ($point) => strtoupper($point->user_code)) : collect();
 
-        $allProductOrderPointsLastMonth = PaymentProductOrderPoint::query()
+        $allProductOrderPointsLastMonth = $isGracePeriod ? PaymentProductOrderPoint::query()
+            ->whereIn('user_id', $paginatedUserIds)
             ->whereMonth('created_at', $mesAnterior->month)->whereYear('created_at', $mesAnterior->year)
-            ->get();
+            ->get()->groupBy('user_id') : collect();
 
-        $userIds = collect($userList->items())->pluck('uuid')->toArray();
-        $paginatedUserIds = collect($userList->items())->pluck('id')->toArray();
         $activeManualReactivationUserIds = ManualReactivation::whereIn('user_id', $paginatedUserIds)
             ->where('state', ManualReactivation::ACTIVE)
             ->pluck('user_id')
@@ -756,60 +723,52 @@ class UserController extends BaseController
             ->groupBy('user_code')->pluck('total_bono', 'user_code');
 
         $activeRanges = Range::where('state', true)->orderBy('points')->get();
+        $rangeRules = app(RangeQualificationService::class)->activeRules();
 
-        foreach ($userList as $key => $user) {
-            $servicePayment = PaymentLog::with(['paymentOrder.pack', 'paymentOrder.sponsor.file'])
-                ->where("user_id", $user->id)->whereIn('state', [PaymentLog::PAGADO, PaymentLog::TERMINADO])->orderBy('created_at', 'desc')->first();
-            $productPayment = PaymentProductOrder::with(['pack'])
-                ->where("user_id", $user->id)->whereIn('state', [PaymentProductOrder::PAGADO, PaymentProductOrder::ENVIADO, PaymentProductOrder::TERMINADO])->orderBy('created_at', 'desc')->first();
+        $items = $userList->getCollection()->map(function (User $user) use (
+            $ownedLogs, $ownedOrders, $currentMonth, $mesAnterior, $isGracePeriod,
+            $activeManualReactivationUserIds, $allPaymentOrderPoints, $allProductOrderPoints,
+            $allPaymentOrderPointsLastMonth, $allProductOrderPointsLastMonth, $rangeRules,
+            $historicalBonuses, $sponsorCodes, $sponsors, $displayLogs, $latestOrders
+        ) {
+            $displayPayment = collect([$displayLogs->get($user->id), $latestOrders->get($user->id)])
+                ->filter()->sortByDesc('created_at')->first();
 
-            $ultimoPago = collect([$servicePayment, $productPayment])->filter()->sortByDesc('created_at')->first();
-            $displayPayment = $this->latestOwnedPackagePayment($user->id);
-
-            $isActive = false;
             $mesFiltro = $currentMonth;
-            $anioFiltro = $currentYear;
 
-            if ($ultimoPago) {
-                $fechaPago = Carbon::parse($ultimoPago->created_at);
-                if ($fechaPago->month == $currentMonth && $fechaPago->year == $currentYear) {
-                    $isActive = true;
-                } elseif ($fechaPago->month == $mesAnterior->month && $fechaPago->year == $mesAnterior->year) {
-                    if ($isGracePeriod) {
-                        $isActive = true;
-                        $mesFiltro = $mesAnterior->month;
-                        $anioFiltro = $mesAnterior->year;
-                    }
+            $logs = $ownedLogs->get($user->id, collect());
+            $orders = $ownedOrders->get($user->id, collect());
+            if ($isGracePeriod) {
+                $serviceDate = $logs->whereIn('state', [PaymentLog::PAGADO, PaymentLog::TERMINADO])->last()?->created_at;
+                $productDate = $orders->last()?->created_at;
+                $fechaPago = $serviceDate && (!$productDate || $serviceDate->gte($productDate))
+                    ? $serviceDate
+                    : $productDate;
+                if ($fechaPago && $fechaPago->month == $mesAnterior->month && $fechaPago->year == $mesAnterior->year) {
+                    $mesFiltro = $mesAnterior->month;
                 }
             }
 
-            if ($user->is_admin || strcasecmp((string) $user->uuid, app(\App\Services\Core\CorporateRootService::class)->uuid()) === 0) {
-                $isActive = true;
-            }
-
-            if (!$isActive && $ultimoPago) $ultimoPago->state = 6;
-            $isActive = app(\App\Services\Core\ActivationService::class)->isActive($user);
-            $sponsorCode = $this->networkTreeService->sponsorCode($user->uuid);
-            $sponsor = $sponsorCode
-                ? User::whereRaw('UPPER(uuid) = ?', [strtoupper($sponsorCode)])->first()
-                : null;
-            $userList[$key]->payment = $this->displayPaymentPayload($displayPayment, $isActive);
-            $userList[$key]->active = $isActive;
-            $userList[$key]->package_name = $user->package_name;
-            $userList[$key]->sponsor_code = $sponsor?->uuid;
-            $userList[$key]->sponsor_uuid = $sponsor?->uuid;
-            $userList[$key]->sponsor_name = $sponsor?->name;
-            $userList[$key]->sponsor = $sponsor ? [
+            $activation = app(\App\Services\Core\ActivationService::class);
+            $isActive = $activation->isActive($user);
+            $sponsorCode = $sponsorCodes->get(strtoupper($user->uuid));
+            $sponsor = $sponsorCode ? $sponsors->get(strtoupper($sponsorCode)) : null;
+            $user->payment = $this->displayPaymentPayload($displayPayment, $isActive);
+            $packageName = $user->packageNameFromPurchases($logs, $orders);
+            $user->sponsor_code = $sponsor?->uuid;
+            $user->sponsor_uuid = $sponsor?->uuid;
+            $user->sponsor_name = $sponsor?->name;
+            $user->sponsor = $sponsor ? [
                 'uuid' => $sponsor->uuid,
                 'name' => $sponsor->name,
             ] : null;
-            $activation = app(\App\Services\Core\ActivationService::class);
-            $userList[$key]->active_product = $activation->isActiveForCategory($user, 'product');
-            $userList[$key]->active_service = $activation->isActiveForCategory($user, 'service');
-            $userList[$key]->packs_by_category = $this->ownedPacksByCategory($user, $activation);
+            $packsByCategory = $this->ownedPacksByCategory($user, $activation, $logs, $orders);
+            $user->active_product = $packsByCategory['product']['active'];
+            $user->active_service = $packsByCategory['service']['active'];
+            $user->packs_by_category = $packsByCategory;
             // Esta marca solo corresponde a reactivaciones mensuales registradas.
             // Una compra normal de paquete o productos no habilita la desactivación.
-            $userList[$key]->manual_reactivation_active = in_array(
+            $user->manual_reactivation_active = in_array(
                 (int) $user->id,
                 $activeManualReactivationUserIds,
                 true
@@ -820,26 +779,22 @@ class UserController extends BaseController
             $productosDisponibles = ($mesFiltro == $currentMonth) ? $allProductOrderPoints : $allProductOrderPointsLastMonth;
 
             // 🔧 Filtrar SOLO los puntos del usuario actual
-            $popUsuario = $puntosDisponibles->filter(function ($point) use ($user) {
-                return strtoupper($point->user_code) == strtoupper($user->uuid);
-            })->values();
+            $popUsuario = $puntosDisponibles->get(strtoupper($user->uuid), collect());
 
-            $ppopUsuario = $productosDisponibles->filter(function ($point) use ($user) {
-                return $point->user_id == $user->id;
-            })->values();
+            $ppopUsuario = $productosDisponibles->get($user->id, collect());
 
             // 🔥 Esto genera el objeto points CON TODOS LOS TIPOS correctos
             $userPoints = $this->calculator->points($user->uuid, $popUsuario, $ppopUsuario);
             
             // 🔥 El total de puntos es el que ya calcula el objeto points (personal + pointGroup + residual)
-            $userList[$key]->totalPoints = $userPoints->total_general;
+            $user->totalPoints = $userPoints->total_general;
 
             // 🔥 ASIGNAR EL OBJETO COMPLETO AL USUARIO
-            $userList[$key]->points = $userPoints;
+            $user->points = $userPoints;
 
             // Keep the modal payload aligned with the `points` object used by the table.
-            $userList[$key]->user_detail = [
-                'paquete_actual'      => $user->package_name,
+            $user->user_detail = [
+                'paquete_actual'      => $packageName,
                 'activo'              => $isActive,
                 'puntos_personales'   => (float) $userPoints->personal,
                 'puntos_red'          => (float) $userPoints->pointGroup,
@@ -852,29 +807,36 @@ class UserController extends BaseController
             ];
 
             // Usar el mismo motor de calificacion que el perfil y el CRON.
-            app(RangeQualificationService::class)->recalculateUser($user);
-            $user->unsetRelation('range');
-            $user->load('range.range.file');
+            app(RangeQualificationService::class)->recalculateUser($user, $rangeRules, $isActive);
+            $user->bonos_totales_historico = $historicalBonuses->get($user->uuid, 0);
+            return $user;
+        });
+
+        $items->load('range.range.file');
+        $items = $items->map(function (User $user) use ($activeRanges) {
             $currentRange = $user->range?->range;
+            $totalPoints = (float) $user->totalPoints;
 
             $nextRange = $activeRanges->first(function ($candidate) use ($currentRange) {
                 return !$currentRange || (int) $candidate->order > (int) $currentRange->order;
             });
             $progressTarget = $nextRange ?: $currentRange;
             $progress = $progressTarget && (float) $progressTarget->points > 0
-                ? min(100, round(((float) $userPoints->total_general / (float) $progressTarget->points) * 100, 2))
+                ? min(100, round(($totalPoints / (float) $progressTarget->points) * 100, 2))
                 : 0;
 
-            $userList[$key]->setRelation('range', $user->range);
-            $userList[$key]->next_range = $nextRange;
-            $userList[$key]->range_progress = $progress;
-            $userList[$key]->points_to_next_range = $nextRange
-                ? max(0, (float) $nextRange->points - (float) $userPoints->total_general)
+            $user->next_range = $nextRange;
+            $user->range_progress = $progress;
+            $user->points_to_next_range = $nextRange
+                ? max(0, (float) $nextRange->points - $totalPoints)
                 : 0;
 
-            // 🔥 Agregar los bonos históricos
-            $userList[$key]->bonos_totales_historico = $historicalBonuses->get($user->uuid, 0);
-        }
+            return $user->setAppends([])->toArray() + [
+                'active' => $user->user_detail['activo'],
+                'package_name' => $user->user_detail['paquete_actual'],
+            ];
+        });
+        $userList->setCollection($items);
 
         return $this->sendResponse(new PaginationCollection($userList), 'Lista obtenida correctamente');
     } catch (\Throwable $th) {
@@ -1619,20 +1581,14 @@ class UserController extends BaseController
         ];
     }
 
-    private function ownedPacksByCategory(User $user, $activation): array
-    {
-        $logs = PaymentLog::with('paymentOrder.pack')
-            ->where('user_id', $user->id)
-            ->whereIn('state', [PaymentLog::PAGADO, PaymentLog::TERMINADO, PaymentLog::RESET])
-            ->latest('created_at')->get();
-        $orders = PaymentProductOrder::with('pack')
-            ->where('user_id', $user->id)
-            ->whereIn('state', [
-                PaymentProductOrder::PAGADO,
-                PaymentProductOrder::ENVIADO,
-                PaymentProductOrder::TERMINADO,
-            ])
-            ->latest('created_at')->get();
+    private function ownedPacksByCategory(
+        User $user,
+        $activation,
+        \Illuminate\Support\Collection $logs,
+        \Illuminate\Support\Collection $orders
+    ): array {
+        $logs = $logs->sortByDesc('created_at');
+        $orders = $orders->sortByDesc('created_at');
 
         return collect([
             'product' => 'Producto',

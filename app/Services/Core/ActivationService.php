@@ -63,10 +63,10 @@ class ActivationService
     }
 
     /** La modalidad de mayor puntaje es el requisito mensual de rango. */
-    public function hasRankActivity(User $user): bool
+    public function hasRankActivity(User $user, ?bool $isActive = null): bool
     {
         if ($user->is_admin || app(CorporateRootService::class)->isRootCode($user->uuid)) return true;
-        if (!$this->isActive($user)) return false;
+        if (!($isActive ?? $this->isActive($user))) return false;
 
         $rule = ActivationRule::where('state', true)->orderByDesc('minimum_points')->first();
         if (!$rule) return false;
@@ -168,6 +168,12 @@ class ActivationService
             ->whereBetween('logs.created_at', [$from, $to])
             ->selectRaw("COALESCE(SUM({$prefix}packs.points), 0) points, COALESCE(SUM(CASE WHEN {$prefix}orders.amount > 0 THEN {$prefix}orders.amount ELSE {$prefix}packs.price END), 0) amount")
             ->first();
+        if ($rules->contains(fn (ActivationRule $rule) =>
+            (float) ($packTotals->points ?? 0) >= $rule->minimum_points
+            && (float) ($packTotals->amount ?? 0) >= $rule->minimum_amount)) {
+            return true;
+        }
+
         $totals = DB::table('payment_product_orders as orders')
             ->join('packs', 'packs.id', '=', 'orders.pack_id')
             ->where('orders.user_id', $user->id)->where('packs.category', 'Producto')
@@ -182,14 +188,10 @@ class ActivationService
             ->whereIn('orders.state', $productStates)
             ->whereBetween('orders.created_at', [$from, $to])
             ->sum('details.quantity');
-        return $rules->contains(function (ActivationRule $rule) use ($packTotals, $totals, $products) {
-            $packQualifies = (float) ($packTotals->points ?? 0) >= $rule->minimum_points
-                && (float) ($packTotals->amount ?? 0) >= $rule->minimum_amount;
-            $monthlyProductsQualify = (float) ($totals->points ?? 0) >= $rule->minimum_points
-                && (float) ($totals->amount ?? 0) >= $rule->minimum_amount
-                && (int) $products >= $rule->minimum_products;
-            return $packQualifies || $monthlyProductsQualify;
-        });
+        return $rules->contains(fn (ActivationRule $rule) =>
+            (float) ($totals->points ?? 0) >= $rule->minimum_points
+            && (float) ($totals->amount ?? 0) >= $rule->minimum_amount
+            && (int) $products >= $rule->minimum_products);
     }
 
     public function isActiveForPeriod(User $user, CarbonInterface $from, CarbonInterface $to, bool $includeClosed = true): bool

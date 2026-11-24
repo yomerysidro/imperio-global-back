@@ -75,13 +75,13 @@ class LoginController extends BaseController
                 if( $verificationCodeUser->state == false ) return $this->sendError('Error, Debes confirmar tu Correo Electrónico.' );
             }
 
-            $_user = User::with(['file'])->find( $user->id );
+            $user->load('file');
 
             $success['name']  = $user->name;
             $success['admin']  = $user->is_admin;
-            $success['token'] = $_user->createToken('accessToken')->accessToken;
-            $success['photo'] = $_user->file?->path;
-            $success['uuid'] =  $_user->uuid;
+            $success['token'] = $user->createToken('accessToken')->accessToken;
+            $success['photo'] = $user->file?->path;
+            $success['uuid'] = $user->uuid;
 
             return $this->sendResponse($success, 'You are successfully logged in.');
         } else {
