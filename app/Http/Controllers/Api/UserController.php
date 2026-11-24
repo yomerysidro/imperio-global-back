@@ -229,6 +229,10 @@ class UserController extends BaseController
                     'pack' => $servicePurchases->first()?->paymentOrder?->pack,
                 ],
             ];
+            if ($user->assignedPack) {
+                $user->packs_by_category = $this->assignedPackCategories($user, $activation);
+            }
+
 
             // 🔥 AGREGAR USER_DETAIL (LO QUE EL FRONTEND NECESITA)
             $user->user_detail = [
@@ -621,6 +625,11 @@ class UserController extends BaseController
 
         if ($request->has('plan') && !empty($request->query('plan'))) {
             $plan = $request->query('plan');
+            $prefix = \App\Models\Option::ASSIGNED_PACK_PREFIX;
+            $assignedUsers = DB::table('options')
+                ->whereRaw('BINARY LEFT(option_key, ?) = ?', [strlen($prefix), $prefix])
+                ->selectRaw('CAST(SUBSTRING(option_key, ?) AS UNSIGNED)', [strlen($prefix) + 1]);
+
             if ($plan == -1) {
                 // Un pack adquirido es permanente. Que el periodo haya terminado o
                 // sido reseteado no significa que el usuario nunca tuvo un plan.
@@ -634,7 +643,7 @@ class UserController extends BaseController
                     PaymentProductOrder::ENVIADO,
                     PaymentProductOrder::TERMINADO,
                 ])->whereNotNull('user_id')->select('user_id');
-                $userList->whereNotIn('id', $serviceOwners->union($productOwners));
+                $userList->whereNotIn('id', $assignedUsers)->whereNotIn('id', $serviceOwners->union($productOwners));
             } else {
                 $serviceOwners = PaymentLog::whereIn('state', [
                     PaymentLog::PAGADO,
@@ -648,11 +657,13 @@ class UserController extends BaseController
                     PaymentProductOrder::ENVIADO,
                     PaymentProductOrder::TERMINADO,
                 ])->where('pack_id', $plan)->select('user_id');
-                $userList->whereIn('id', $serviceOwners->union($productOwners));
+                $userList->where(fn ($query) => $query->whereIn('id', (clone $assignedUsers)->where('option_value', $plan))
+                    ->orWhere(fn ($legacy) => $legacy->whereNotIn('id', $assignedUsers)
+                        ->whereIn('id', $serviceOwners->union($productOwners))));
             }
         }
 
-        $userList = $userList->orderBy('created_at', 'desc')->paginate($limit);
+        $userList = $userList->with('assignedPackOption.pack')->orderBy('created_at', 'desc')->paginate($limit);
 
         if ($userList->isEmpty()) {
             return $this->sendResponse(new PaginationCollection($userList), 'Lista obtenida correctamente');
@@ -894,8 +905,28 @@ class UserController extends BaseController
             // depende de que el usuario ya tenga un punto de compra tipo B.
             $currentSponsor = $this->networkTreeService->sponsorCode($userUpdated->uuid);
 
-            $packId    = ($request->has('packId') && $request->packId > 0) ? $request->packId : null;
-            $serviceId = ($request->has('serviceId') && $request->serviceId > 0) ? $request->serviceId : null;
+            $packId = $request->input('packId') ?: null;
+            $serviceId = $request->input('serviceId') ?: null;
+            $productPack = $packId ? Pack::find($packId) : null;
+            $servicePack = $serviceId ? Pack::find($serviceId) : null;
+            $assignedPack = $userUpdated->assignedPack;
+            if ($assignedPack || $productPack?->isStarter() || $servicePack?->isStarter()) {
+                $selected = collect([$productPack, $servicePack])->filter()
+                    ->reject(fn (Pack $pack) => $pack->id === $assignedPack?->id);
+                if (($packId && (!$productPack || strcasecmp($productPack->category, 'Producto') !== 0))
+                    || ($serviceId && (!$servicePack || strcasecmp($servicePack->category, 'Servicio') !== 0))
+                    || $selected->count() > 1 || ($selected->isNotEmpty() && !$selected->first()->state)) {
+                    DB::rollBack();
+                    return $this->sendError('Selecciona un solo paquete vigente para la asignacion.', [], 422);
+                }
+
+                if ($selected->isNotEmpty()) {
+                    $userUpdated->assignPack($selected->first());
+                }
+
+                DB::commit();
+                return $this->sendResponse(true, 'Usuario actualizado. Paquete asignado.');
+            }
 
             if (($packId || $serviceId) && !$currentSponsor) {
                 DB::rollBack();
@@ -1255,6 +1286,11 @@ class UserController extends BaseController
                 return $this->sendError("No existe el plan seleccionado");
             }
 
+            if ($packCurrent->isStarter() && (!Auth::user()?->is_admin || !$packCurrent->state)) {
+                DB::rollBack();
+                return $this->sendError('El Kit de Inicio requiere una asignacion administrativa habilitada.', [], 403);
+            }
+
             $userCreated = User::create([
                 'name'     => $dataBody->name,
                 'email'    => $dataBody->email,
@@ -1272,24 +1308,28 @@ class UserController extends BaseController
                 "state"   => true
             ]);
 
-            $_paymentOrder = PaymentOrder::create([
-                'currency'     => "PEN",
-                'amount'       => $packCurrent->price,
-                'sponsor_code' => $sponsor->uuid,
-                'pack_id'      => $dataBody->plan,
-                "token"        => uniqid($packCurrent->title)
-            ]);
+            if ($packCurrent->isStarter()) {
+                $userCreated->assignPack($packCurrent);
+            } else {
+                $_paymentOrder = PaymentOrder::create([
+                    'currency'     => "PEN",
+                    'amount'       => $packCurrent->price,
+                    'sponsor_code' => $sponsor->uuid,
+                    'pack_id'      => $dataBody->plan,
+                    "token"        => uniqid($packCurrent->title)
+                ]);
 
-            PaymentLog::create([
-                'payment_order_id' => $_paymentOrder->id,
-                "confirm"          => true,
-                'user_id'          => $userCreated->id,
-                "state"            => PaymentLog::PAGADO,
-                "message"          => "Activación de nuevo socio: " . $packCurrent->title
-            ]);
+                PaymentLog::create([
+                    'payment_order_id' => $_paymentOrder->id,
+                    "confirm"          => true,
+                    'user_id'          => $userCreated->id,
+                    "state"            => PaymentLog::PAGADO,
+                    "message"          => "Activación de nuevo socio: " . $packCurrent->title
+                ]);
 
-            // Llamada al servicio
-            $this->commissionService->confirmPoint($_paymentOrder, $userCreated, $packCurrent);
+                // Llamada al servicio
+                $this->commissionService->confirmPoint($_paymentOrder, $userCreated, $packCurrent);
+            }
 
             DB::commit();
             \Illuminate\Support\Facades\Cache::forget('existing_user_uuids');
@@ -1297,7 +1337,7 @@ class UserController extends BaseController
             return $this->sendResponse([
                 'user_id' => $userCreated->id,
                 'uuid'    => $userCreated->uuid,
-                'message' => 'Usuario y red de puntos activada correctamente.'
+                'message' => $packCurrent->isStarter() ? 'Usuario creado. Kit de Inicio asignado.' : 'Usuario y red de puntos activada correctamente.'
             ], 'Usuario creado exitosamente');
         } catch (\Throwable $e) {
             DB::rollBack();
@@ -1587,6 +1627,10 @@ class UserController extends BaseController
         \Illuminate\Support\Collection $logs,
         \Illuminate\Support\Collection $orders
     ): array {
+        if ($user->assignedPack) {
+            return $this->assignedPackCategories($user, $activation);
+        }
+
         $logs = $logs->sortByDesc('created_at');
         $orders = $orders->sortByDesc('created_at');
 
@@ -1613,6 +1657,19 @@ class UserController extends BaseController
                 'pack' => $latest['pack'] ?? null,
             ]];
         })->all();
+    }
+
+    private function assignedPackCategories(User $user, \App\Services\Core\ActivationService $activation): array
+    {
+        $pack = $user->assignedPack;
+        $category = strcasecmp($pack->category, 'Servicio') === 0 ? 'service' : 'product';
+
+        return collect(['product', 'service'])->mapWithKeys(fn (string $key) => [$key => [
+            'owned' => $key === $category,
+            'active' => $key === $category && $activation->isActiveForCategory($user, $key),
+            'pack' => $key === $category ? $pack : null,
+            'assigned' => $key === $category,
+        ]])->all();
     }
 
     private function sponsorshipTotal($points): float

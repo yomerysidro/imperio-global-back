@@ -44,6 +44,10 @@ class PackController extends BaseController
 
             if ($validator->fails()) return $this->sendError('Error de validacion.', $validator->errors(), 422);
 
+            if (strcasecmp(trim((string) $request->input('title')), Pack::STARTER_TITLE) === 0) {
+                return $this->sendError('El Kit de Inicio se administra mediante Artisan.', [], 422);
+            }
+
             DB::beginTransaction();
 
             $dataBody = (object) $request->all();
@@ -97,6 +101,10 @@ class PackController extends BaseController
             ]);
 
             if ($validator->fails()) return $this->sendError('Error de validacion.', $validator->errors(), 422);
+
+            if (Pack::find($packId)?->isStarter() || strcasecmp(trim((string) $request->input('title')), Pack::STARTER_TITLE) === 0) {
+                return $this->sendError('El Kit de Inicio se administra mediante Artisan.', [], 422);
+            }
 
             DB::beginTransaction();
 

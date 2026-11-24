@@ -9,6 +9,13 @@ class Option extends Model
 {
     use HasFactory;
 
+    public const ASSIGNED_PACK_PREFIX = 'member.assigned-pack.';
+
+    public function pack()
+    {
+        return $this->belongsTo(Pack::class, 'option_value');
+    }
+
     protected $fillable = [
         'option_key',
         'option_value',

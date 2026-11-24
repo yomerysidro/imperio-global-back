@@ -11,6 +11,13 @@ class Pack extends Model
 {
     use HasFactory, Uuid;
 
+    public const STARTER_TITLE = 'Kit de Inicio';
+
+    public function isStarter(): bool
+    {
+        return strcasecmp(trim((string) $this->title), self::STARTER_TITLE) === 0;
+    }
+
     public $incrementing = false;
     protected $keyType = 'string';
 

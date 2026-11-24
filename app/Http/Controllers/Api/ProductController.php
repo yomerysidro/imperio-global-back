@@ -4,9 +4,9 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\BaseController;
 use App\Models\File;
-use App\Models\PaymentLog;
 use App\Models\PaymentProductOrderDetail;
 use App\Models\Product;
+use App\Models\PaymentLog;
 use App\Models\ProductPointPack;
 use App\Models\User;
 use Illuminate\Http\Request;
@@ -247,9 +247,12 @@ class ProductController extends BaseController
     private function catalogProduct(Product $product, float $discount): Product
     {
         $publicPrice = round((float) $product->price, 2);
+        $finalPrice = round($publicPrice * (100 - $discount) / 100, 2);
         $product->setAttribute('public_price', $publicPrice);
         $product->setAttribute('discount_percentage', $discount);
-        $product->setAttribute('final_price', round($publicPrice * (100 - $discount) / 100, 2));
+        $product->setAttribute('subtotal', $publicPrice);
+        $product->setAttribute('discount_amount', round($publicPrice - $finalPrice, 2));
+        $product->setAttribute('final_price', $finalPrice);
         $product->setAttribute('points', (int) $product->points);
         return $product;
     }
@@ -257,6 +260,10 @@ class ProductController extends BaseController
     private function discountFor(?User $user): float
     {
         if (!$user || $user->is_admin) return 0;
+        if ($user->assignedPack) {
+            return max(0, min(100, (float) $user->assignedPack->discount));
+        }
+
         $payment = PaymentLog::query()
             ->join('payment_orders', 'payment_orders.id', '=', 'payment_logs.payment_order_id')
             ->join('packs', 'packs.id', '=', 'payment_orders.pack_id')
