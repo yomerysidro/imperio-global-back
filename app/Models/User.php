@@ -65,6 +65,31 @@ class User extends Authenticatable
         return $this->packageNameFromPurchases();
     }
 
+    public static function packageNamesFor(iterable $users): array
+    {
+        $names = [];
+        foreach (collect($users)->filter()->unique('id')->chunk(500) as $batch) {
+            $ids = $batch->pluck('id');
+            $services = PaymentLog::with('paymentOrder:id,pack_id', 'paymentOrder.pack:id,title,category')
+                ->whereIn('user_id', $ids)
+                ->whereIn('state', [PaymentLog::PAGADO, PaymentLog::TERMINADO, PaymentLog::RESET])
+                ->orderBy('created_at')->get(['user_id', 'payment_order_id', 'created_at'])->groupBy('user_id');
+            $products = PaymentProductOrder::with('pack:id,title,category')
+                ->whereIn('user_id', $ids)
+                ->whereIn('state', [PaymentProductOrder::PAGADO, PaymentProductOrder::ENVIADO, PaymentProductOrder::TERMINADO])
+                ->orderBy('created_at')->get(['user_id', 'pack_id', 'created_at'])->groupBy('user_id');
+
+            foreach ($batch as $user) {
+                $names[$user->id] = $user->packageNameFromPurchases(
+                    $services->get($user->id, collect()),
+                    $products->get($user->id, collect())
+                );
+            }
+        }
+
+        return $names;
+    }
+
     public function packageNameFromPurchases(
         ?\Illuminate\Support\Collection $services = null,
         ?\Illuminate\Support\Collection $products = null

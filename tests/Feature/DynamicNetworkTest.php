@@ -53,6 +53,11 @@ class DynamicNetworkTest extends TestCase
 
         $this->assertCount(1, $relationReads);
         $this->assertSame($root->uuid, $snapshot['nodes'][strtoupper($child->uuid)]['parent_code']);
+        $tree = app(NetworkTreeService::class);
+        $graph = $tree->descendantGraph($root->uuid);
+        $this->assertSame([$root->uuid, ...$graph['codes']], $tree->getAllNetworkUsers($root->uuid));
+        $this->assertSame($tree->directUserCodes($root->uuid), $graph['direct']);
+        $this->assertSame($tree->countTotalNetworkRecursive($root->uuid), $graph['edge_count']);
     }
 
     public function test_member_list_preserves_page_sponsor_and_package_fields(): void
@@ -76,6 +81,42 @@ class DynamicNetworkTest extends TestCase
             ->assertJsonPath('data.items.0.package_name', 'Sin paquetes registrados')
             ->assertJsonPath('data.items.0.packs_by_category.product.owned', false)
             ->assertJsonPath('data.items.0.packs_by_category.service.owned', false);
+    }
+
+    public function test_points_tree_keeps_a_descendant_without_purchase_and_its_profile_aliases(): void
+    {
+        $root = $this->account('company');
+        $child = $this->account('tree-child');
+        $grandchild = $this->account('tree-grandchild');
+        config(['mlm.root_uuid' => $root->uuid]);
+        foreach ([[$child, $root], [$grandchild, $child]] as [$member, $sponsor]) {
+            SponsorRelation::create([
+                'user_code' => $member->uuid,
+                'sponsor_code' => $sponsor->uuid,
+                'source' => 'registration',
+                'state' => true,
+            ]);
+        }
+
+        $activation = app(\App\Services\Core\ActivationService::class);
+        $batch = $activation->activityForUsers([$root, $child, $grandchild]);
+        foreach ([$root, $child, $grandchild] as $member) {
+            $this->assertSame($activation->isActive($member), $batch[$member->id]);
+        }
+
+        Passport::actingAs($root);
+        $response = $this->getJson('/api/v1/points/users')
+            ->assertOk()
+            ->assertJsonPath('data.network_tree.uuid', $root->uuid)
+            ->assertJsonPath('data.network_tree.children.0.parent_uuid', $root->uuid)
+            ->assertJsonPath('data.network_tree.children.0.children.0.uuid', $grandchild->uuid)
+            ->assertJsonPath('data.network_meta.returned_nodes', 2)
+            ->assertJsonPath('data.network_meta.complete', true)
+            ->assertJsonPath('data.user.red_total', 2)
+            ->assertJsonPath('data.points.0.payment', 0);
+
+        $this->assertSame($response->json('data.points.0.user'), $response->json('data.points.0.user_point'));
+        $this->assertSame($child->uuid, $response->json('data.points.0.user.uuid'));
     }
 
     public function test_registration_under_moved_member_is_immediate_and_repeat_does_not_duplicate(): void

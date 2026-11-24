@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\User;
+use App\Services\Core\ActivationService;
 use App\Services\Core\NetworkTreeService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -30,11 +31,13 @@ class NetworkGenealogyController extends Controller
         }
         $page = $query->paginate($input['perPage'] ?? 50, ['id', 'uuid', 'name', 'is_admin']);
         $sponsors = $this->tree->sponsorCodes($page->getCollection()->pluck('uuid')->all());
-        $page->through(function (User $user) use ($snapshot, $sponsors) {
+        $packageNames = User::packageNamesFor($page->getCollection());
+        $activity = app(ActivationService::class)->activityForUsers($page->getCollection());
+        $page->through(function (User $user) use ($snapshot, $sponsors, $packageNames, $activity) {
             $node = $snapshot['nodes'][strtoupper($user->uuid)] ?? null;
             return [
                 'uuid' => $user->uuid, 'name' => $user->name,
-                'active' => $user->active, 'package_name' => $user->package_name,
+                'active' => $activity[$user->id], 'package_name' => $packageNames[$user->id],
                 'sponsor_code' => $sponsors->get(strtoupper($user->uuid)),
                 'level' => $node['level'] ?? null, 'connected' => $node !== null,
             ];
@@ -88,10 +91,12 @@ class NetworkGenealogyController extends Controller
         $profiles = User::whereIn('uuid', $pageCodes)->get(['id', 'uuid', 'name', 'is_admin'])
             ->keyBy(fn (User $profile) => strtoupper($profile->uuid));
         $sponsors = $this->tree->sponsorCodes($pageCodes);
-        $rows = collect($pageCodes)->map(function ($code) use ($profiles, $sponsors) {
+        $packageNames = User::packageNamesFor($profiles);
+        $activity = app(ActivationService::class)->activityForUsers($profiles);
+        $rows = collect($pageCodes)->map(function ($code) use ($profiles, $sponsors, $packageNames, $activity) {
             $u = $profiles->get(strtoupper($code));
-            return ['uuid' => $code, 'name' => $u?->name, 'active' => $u?->active,
-                'package_name' => $u?->package_name, 'sponsor_code' => $sponsors->get(strtoupper($code))];
+            return ['uuid' => $code, 'name' => $u?->name, 'active' => $u ? $activity[$u->id] : null,
+                'package_name' => $u ? $packageNames[$u->id] : null, 'sponsor_code' => $sponsors->get(strtoupper($code))];
         });
         return response()->json(new \Illuminate\Pagination\LengthAwarePaginator(
             $rows, count($codes), $perPage, $page

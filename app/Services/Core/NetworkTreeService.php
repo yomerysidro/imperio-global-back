@@ -262,30 +262,60 @@ class NetworkTreeService
 
     public function descendantCodes(string $rootCode): array
     {
+        return $this->descendantGraph($rootCode)['codes'];
+    }
+
+    public function descendantGraph(string $rootCode): array
+    {
         $queue = [$rootCode];
         $seen = [strtoupper($rootCode) => true];
-        $descendants = [];
+        $children = [];
 
         while ($queue) {
             $next = [];
             foreach (array_chunk($queue, 500) as $parents) {
                 $relations = SponsorRelation::where('state', true)->whereIn('sponsor_code', $parents)
-                    ->get(['user_code']);
+                    ->get(['user_code', 'sponsor_code']);
                 foreach ($relations as $relation) {
                     $code = $relation->user_code;
                     $key = strtoupper($code);
+                    $parent = strtoupper($relation->sponsor_code);
+                    if ($key === $parent) {
+                        continue;
+                    }
+                    $children[$parent][$key] ??= $code;
                     if (isset($seen[$key])) {
                         continue;
                     }
                     $seen[$key] = true;
                     $next[] = $code;
-                    $descendants[] = $code;
                 }
             }
             $queue = $next;
         }
 
-        return $descendants;
+        $rootKey = strtoupper($rootCode);
+        $pending = array_reverse(array_values($children[$rootKey] ?? []));
+        $seen = [$rootKey => true];
+        $descendants = [];
+        while ($pending) {
+            $code = array_pop($pending);
+            $key = strtoupper($code);
+            if (isset($seen[$key])) {
+                continue;
+            }
+            $seen[$key] = true;
+            $descendants[] = $code;
+            foreach (array_reverse($children[$key] ?? []) as $child) {
+                $pending[] = $child;
+            }
+        }
+
+        return [
+            'codes' => $descendants,
+            'direct' => array_values($children[$rootKey] ?? []),
+            'edge_count' => array_sum(array_map('count', $children)),
+        ];
     }
 
     public function getAllNetworkUsers($userCode, &$visited = [])

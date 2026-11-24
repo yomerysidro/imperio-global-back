@@ -137,15 +137,12 @@ class PaymentOrderPointController extends BaseController
             }
 
             $userModel->payment = $ultimoPago;
-            $userModel->active = $isActive;
             $userModel->estado_visual = $estadoVisual;
             // -----------------------------------------------------------
 
             // OBTENEMOS A TODA LA RED SIN IMPORTAR EL MES (para mostrar árbol)
-            $allDownlineCodes = array_values(array_filter(
-                $this->networkTreeService->getAllNetworkUsers($userModel->uuid),
-                fn ($code) => strcasecmp($code, $userModel->uuid) !== 0
-            ));
+            $graph = $this->networkTreeService->descendantGraph($userModel->uuid);
+            $allDownlineCodes = $graph['codes'];
             $currentParents = SponsorRelation::whereIn('user_code', $allDownlineCodes)
                 ->where('state', true)->pluck('sponsor_code', 'user_code');
             $parentByChild = [];
@@ -153,7 +150,7 @@ class PaymentOrderPointController extends BaseController
                 $parentByChild[strtoupper((string) $childCode)] = $parentCode;
             }
 
-            $rawNetworkPoints = PaymentOrderPoint::with(['userPoint.file', 'userPoint.paymentActive', 'sponsor'])
+            $rawNetworkPoints = PaymentOrderPoint::query()
                 ->whereIn('user_code', $allDownlineCodes)
                 ->where('payment', 1)
                 ->where('type', PaymentOrderPoint::COMPRA)
@@ -161,15 +158,17 @@ class PaymentOrderPointController extends BaseController
                 ->get();
 
             $networkPoints = $rawNetworkPoints->unique('user_code')->values();
+            unset($rawNetworkPoints);
+            $networkPoints->load(['userPoint.file', 'userPoint.paymentActive', 'sponsor']);
 
             // Una relación genealógica puede existir aunque el movimiento B
             // histórico falte o haya sido desactivado. Esos socios también
             // pertenecen al árbol y deben aparecer como nodos sin puntos.
             $codesWithPoint = $networkPoints->pluck('user_code')
-                ->map(fn ($code) => strtoupper($code))->all();
+                ->map(fn ($code) => strtoupper($code))->flip();
             $missingCodes = array_values(array_filter(
                 $allDownlineCodes,
-                fn ($code) => !in_array(strtoupper($code), $codesWithPoint, true)
+                fn ($code) => !$codesWithPoint->has(strtoupper($code))
             ));
             $missingUsers = User::with('file')->whereIn('uuid', $missingCodes)->get()->keyBy(
                 fn ($user) => strtoupper($user->uuid)
@@ -177,7 +176,6 @@ class PaymentOrderPointController extends BaseController
             foreach ($missingCodes as $missingCode) {
                 $placeholder = new PaymentOrderPoint();
                 $placeholder->user_code = $missingCode;
-                $placeholder->sponsor_code = $this->networkTreeService->sponsorCode($missingCode);
                 $placeholder->type = PaymentOrderPoint::COMPRA;
                 $placeholder->point = 0;
                 $placeholder->payment = 0;
@@ -187,13 +185,25 @@ class PaymentOrderPointController extends BaseController
             }
 
             // OBTENEMOS LOS PUNTOS ESTRICTAMENTE DEL MES DE EVALUACIÓN
+            $monthlyFrom = $now->copy()->setDate($anioFiltro, $mesFiltro, 1)->startOfDay();
+            $monthlyTo = $monthlyFrom->copy()->addMonth();
             $allPointsTable = PaymentOrderPoint::query()
+                ->whereIn('user_code', [...$allDownlineCodes, $userModel->uuid])
                 ->when(!$isGracePeriod, fn ($query) => $query->where('state', true))
-                ->whereMonth('created_at', $mesFiltro)->whereYear('created_at', $anioFiltro)->get();
+                ->where('created_at', '>=', $monthlyFrom)->where('created_at', '<', $monthlyTo)->get();
+            $allPointsTable->whereIn('type', [PaymentOrderPoint::COMPRA, PaymentOrderPoint::GRUPAL])
+                ->load('paymentOrder:id,pack_id', 'paymentOrder.pack:id,category');
+            $pointsByUser = $allPointsTable->groupBy(fn ($row) => strtoupper($row->user_code));
             $allProductPoints = PaymentProductOrderPoint::query()
                 ->when(!$isGracePeriod, fn ($query) => $query->where('state', true))
-                ->whereMonth('created_at', $mesFiltro)->whereYear('created_at', $anioFiltro)->get();
+                ->where('created_at', '>=', $monthlyFrom)->where('created_at', '<', $monthlyTo)
+                ->get(['created_at', 'state', 'points']);
 
+            [$visibleFrom] = $activation->visiblePeriod($now);
+            $rootProductVolume = $this->calculator->productVolume($allProductPoints, $mesFiltro, $anioFiltro, $isGracePeriod);
+            $nodeProductVolume = $visibleFrom->month === $mesFiltro && $visibleFrom->year === $anioFiltro
+                ? $rootProductVolume
+                : $this->calculator->productVolume($allProductPoints, $visibleFrom->month, $visibleFrom->year, $isGracePeriod);
             // COMISIONES HISTÓRICAS ACUMULADAS (Patrocinio + Residual de TODOS los meses)
             $historicalCommissions = PaymentOrderPoint::where('state', true)
                 ->where('user_code', $userModel->uuid)
@@ -207,31 +217,42 @@ class PaymentOrderPointController extends BaseController
                 ->get();
 
             // Combinar puntos del mes + comisiones históricas
-            $combinedPoints = $allPointsTable->merge($historicalCommissions);
+            $rootMonthlyPoints = $pointsByUser->get(strtoupper($userModel->uuid), new \Illuminate\Database\Eloquent\Collection());
+            $combinedPoints = $rootMonthlyPoints->merge($historicalCommissions);
 
             // TRANSFORMACIÓN DE NODOS
-            $networkPoints->transform(function ($item) use ($allPointsTable, $allProductPoints, $activation, $parentByChild) {
-                $item->user = $item->userPoint;
+            $profiles = $networkPoints->toBase()->flatMap(fn (PaymentOrderPoint $item) => [
+                $item->userPoint, $item->relationLoaded('sponsor') ? $item->getRelation('sponsor') : null,
+            ])->push($userModel)->filter()->unique('id');
+            $activityById = $activation->activityForUsers($profiles);
+            $knownActivity = $profiles->mapWithKeys(fn (User $profile) => [
+                strtoupper($profile->uuid) => $activityById[$profile->id],
+            ])->all();
+            $networkPoints->transform(function ($item) use (
+                $pointsByUser, $nodeProductVolume, $allProductPoints, $activityById, $parentByChild,
+                $visibleFrom, $isGracePeriod
+            ) {
                 // Financial point rows retain their historical sponsor snapshot.
                 // Tree edges always come from the current active genealogy.
                 $item->sponsor_code = $parentByChild[strtoupper((string) $item->user_code)] ?? null;
                 $item->parent_uuid = $item->sponsor_code;
 
                 // Verificar si está activo en el ciclo actual
-                $hasBoughtThisCycle = $item->userPoint
-                    ? $activation->isActive($item->userPoint)
-                    : false;
+                $profile = $item->userPoint;
+                $hasBoughtThisCycle = $profile ? $activityById[$profile->id] : false;
 
                 $item->active = $hasBoughtThisCycle;
                 $item->state = $hasBoughtThisCycle ? PaymentLog::PAGADO : PaymentLog::TERMINADO;
 
-                if ($item->userPoint) {
-                    [$from] = $activation->visiblePeriod();
-                    $includeClosed = $activation->isMonthlyGracePeriod();
-                    $item->points = $this->calculator->points(
-                        $item->user_code, $allPointsTable, $allProductPoints,
-                        $from->month, $from->year, $includeClosed
-                    );
+                if ($profile) {
+                    $rows = $pointsByUser->get(strtoupper($item->user_code), []);
+                    $item->points = strcasecmp($profile->uuid, $item->user_code) === 0
+                        ? $this->calculator->pointsForKnownUser(
+                            $item->user_code, $rows, $nodeProductVolume, $visibleFrom->month, $visibleFrom->year, $isGracePeriod
+                        )
+                        : $this->calculator->points(
+                            $item->user_code, $rows, $allProductPoints, $visibleFrom->month, $visibleFrom->year, $isGracePeriod
+                        );
                     $item->totalPoints = $this->calculator->volumeTotal($item->points);
                 }
                 return $item;
@@ -254,15 +275,16 @@ class PaymentOrderPointController extends BaseController
             }
 
             // CONTADORES DEL ÁRBOL
-            $userModel->directos = count($this->networkTreeService->directUserCodes($userModel->uuid));
-            $networkMetrics = app(\App\Services\Core\NetworkActivityMetrics::class)->forUser($userModel);
+            $userModel->directos = count($graph['direct']);
+            $networkMetrics = app(\App\Services\Core\NetworkActivityMetrics::class)
+                ->forUser($userModel, $allDownlineCodes, $graph['direct'], $knownActivity);
             $userModel->activos = $networkMetrics['total_active'];
-            $userModel->red_total = $this->networkTreeService->countTotalNetworkRecursive($userModel->uuid);
+            $userModel->red_total = $graph['edge_count'];
             $userModel->personas_red = $userModel->red_total;
 
             // TUS PUNTOS: Si estás inactivo, TODO en 0 excepto comisiones históricas
             if (!$isActive) {
-                $historical = $this->calculator->points($userModel->uuid, $historicalCommissions, collect());
+                $historical = $this->calculator->pointsForKnownUser($userModel->uuid, $historicalCommissions, 0, $currentMonth, $currentYear, false);
                 $userModel->points = (object) [
                     "patrocinio" => $historical->patrocinio,
                     "bono" => $historical->patrocinio,
@@ -281,20 +303,40 @@ class PaymentOrderPointController extends BaseController
                 ];
                 $userModel->totalPoints = 0;
             } else {
-                $userModel->points = $this->calculator->points(
-                    $userModel->uuid, $combinedPoints, $allProductPoints,
+                $userModel->points = $this->calculator->pointsForKnownUser(
+                    $userModel->uuid, $combinedPoints, $rootProductVolume,
                     $mesFiltro, $anioFiltro, $isGracePeriod
                 );
                 $userModel->totalPoints = $this->calculator->volumeTotal($userModel->points);
             }
 
-            $serializedPoints = $networkPoints->map(fn ($item) => $item->toArray())->values();
+            $packageNames = User::packageNamesFor($profiles);
+            $serializeProfile = function (?User $profile) use ($packageNames, $activityById): ?array {
+                if (!$profile) {
+                    return null;
+                }
+
+                return (clone $profile)->setAppends([])->toArray() + [
+                    'active' => $activityById[$profile->id],
+                    'package_name' => $packageNames[$profile->id],
+                ];
+            };
+            $serializedPoints = $networkPoints->map(function (PaymentOrderPoint $item) use ($serializeProfile) {
+                $row = $item->attributesToArray();
+                $row['user_point'] = $serializeProfile($item->userPoint);
+                $row['user'] = $row['user_point'];
+                if ($item->relationLoaded('sponsor')) {
+                    $row['sponsor'] = $serializeProfile($item->getRelation('sponsor'));
+                }
+                return $row;
+            })->values();
             $pointsByCode = $serializedPoints->keyBy(fn (array $item) => strtoupper((string) $item['user_code']));
             $childrenByParent = [];
             foreach ($parentByChild as $childCode => $parentCode) {
                 $childrenByParent[strtoupper((string) $parentCode)][] = $childCode;
             }
-            $buildNode = function (string $code, array $path = []) use (&$buildNode, $pointsByCode, $childrenByParent): ?array {
+            $path = [];
+            $buildNode = function (string $code) use (&$buildNode, &$path, $pointsByCode, $childrenByParent): ?array {
                 $key = strtoupper($code);
                 if (isset($path[$key])) return null;
                 $item = $pointsByCode->get($key);
@@ -305,16 +347,17 @@ class PaymentOrderPointController extends BaseController
                 $node['parent_uuid'] = $item['sponsor_code'];
                 $node['children'] = [];
                 foreach ($childrenByParent[$key] ?? [] as $childCode) {
-                    $childNode = $buildNode($childCode, $path);
+                    $childNode = $buildNode($childCode);
                     if ($childNode !== null) $node['children'][] = $childNode;
                 }
                 $node['has_children'] = count($node['children']) > 0;
+                unset($path[$key]);
                 return $node;
             };
             $root = [
                 'uuid' => $userModel->uuid, 'user_code' => $userModel->uuid,
                 'parent_uuid' => null, 'name' => $userModel->name,
-                'children' => [], 'has_children' => count($this->networkTreeService->directUserCodes($userModel->uuid)) > 0,
+                'children' => [], 'has_children' => $graph['direct'] !== [],
             ];
             foreach ($childrenByParent[strtoupper($userModel->uuid)] ?? [] as $childCode) {
                 $childNode = $buildNode($childCode);
@@ -322,7 +365,7 @@ class PaymentOrderPointController extends BaseController
             }
 
             return $this->sendResponse([
-                'points' => $serializedPoints, 'user' => $userModel,
+                'points' => $serializedPoints, 'user' => $serializeProfile($userModel),
                 'network_tree' => $root,
                 'network_meta' => [
                     ...$networkMetrics,

@@ -33,6 +33,31 @@ class Calculator
         $now = Carbon::now();
         $targetMonth = $month ?? $now->month;
         $targetYear = $year ?? $now->year;
+        $productPoints = $this->productVolume($paymentProductOrderPoints, $targetMonth, $targetYear, $includeClosed);
+
+        return $this->pointsForKnownUser($userCode, $paymentOrderPoints, $productPoints, $targetMonth, $targetYear, $includeClosed);
+    }
+
+    public function productVolume(iterable $rows, int $month, int $year, bool $includeClosed): float
+    {
+        $points = 0.0;
+        foreach ($rows as $row) {
+            $date = Carbon::parse($row->created_at);
+            if ($date->month == $month && $date->year == $year && ($includeClosed || (int) $row->state === 1)) {
+                $points += (float) ($row->points ?? 0);
+            }
+        }
+        return $points;
+    }
+
+    public function pointsForKnownUser(
+        string $userCode,
+        iterable $paymentOrderPoints,
+        float $productPoints,
+        int $targetMonth,
+        int $targetYear,
+        bool $includeClosed
+    ): object {
         $userCodeUpper = strtoupper($userCode);
 
         // ACUMULADORES
@@ -42,7 +67,7 @@ class Calculator
         $residualServicio = 0.0;
         $pointGroupProducto = 0.0;
         $pointGroupServicio = 0.0;
-        $puntosProducto = 0.0;
+        $puntosProducto = $productPoints;
         $puntosServicio = 0.0;
         $infinito = 0.0;
 
@@ -54,13 +79,6 @@ class Calculator
         // =========================================================
         // 1. PROCESAR PRODUCTOS FÍSICOS
         // =========================================================
-        foreach ($paymentProductOrderPoints as $productOrder) {
-            $fecha = Carbon::parse($productOrder->created_at);
-            if ($fecha->month == $targetMonth && $fecha->year == $targetYear
-                && ($includeClosed || (int) $productOrder->state === 1)) {
-                $puntosProducto += (float) ($productOrder->points ?? 0);
-            }
-        }
 
         // =========================================================
         // 2. PROCESAR ÓRDENES DE LA RED (SOPORTA LEGACY)
@@ -108,7 +126,7 @@ class Calculator
             // =========================================================
             if ($userCodeUpper === $userCodeOrden && in_array($tipoFila, self::TIPOS_COMPRA_PERSONAL)) {
                 if (!isset($processedPersonal[$orderId])) {
-                    $categoria = $this->resolvePackCategory($packId, $orderId);
+                    $categoria = $this->pointPackCategory($orderPoint, $packId, $orderId);
                     if ($categoria === 'PRODUCTO') {
                         $puntosProducto += $valorFila;
                     } else {
@@ -170,7 +188,7 @@ class Calculator
             if ($userCodeUpper === $userCodeOrden && in_array($tipoFila, self::TIPOS_VOLUMEN_GRUPAL)) {
                 $key = "grupal_{$orderId}";
                 if (!isset($processedGrupal[$key])) {
-                    $categoria = $this->resolvePackCategory($packId, $orderId);
+                    $categoria = $this->pointPackCategory($orderPoint, $packId, $orderId);
                     if ($categoria === 'PRODUCTO') {
                         $pointGroupProducto += $valorFila;
                     } else {
@@ -235,6 +253,17 @@ class Calculator
      * resolvePackCategory() - CORREGIDO PARA SOPORTAR LEGACY
      * ============================================================
      */
+    private function pointPackCategory(object $point, ?string $packId, ?string $orderId): string
+    {
+        if (!$packId && !str_starts_with($orderId ?? '', 'LEGACY_')
+            && $point instanceof PaymentOrderPoint && $point->relationLoaded('paymentOrder')) {
+            $category = $point->paymentOrder?->pack?->category;
+            return $category ? strtoupper($category) : 'SERVICIO';
+        }
+
+        return $this->resolvePackCategory($packId, $orderId);
+    }
+
     private function resolvePackCategory(?string $packId, ?string $orderId): string
     {
         // 🔥 Si es un ID legacy, retornar categoría por defecto
