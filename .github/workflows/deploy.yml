@@ -3,7 +3,8 @@ name: Deploy Backend Imperio Global
 
 on:
   push:
-    branches: ["main"]
+    branches:
+      - main
   workflow_dispatch:
 
 concurrency:
@@ -15,61 +16,122 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Codigo del Repositorio
+      - name: 1. Descargar codigo desde GitHub
         uses: actions/checkout@v4
 
-      - name: Despliegue SSH en V2Networks
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: '205.234.243.127'
-          username: 'ubuntu'
-          password: ${{ secrets.V2_SSH_PASSWORD }}
-          port: 22
-          fingerprint: 'SHA256:zrXAwTBx3+1smpR+vc0Tjj78+jYk2gGitm4H/vxjos0'
-          command_timeout: 15m
-          script: |
-            set -e
+      - name: 2. Configurar SSH seguro
+        env:
+          SSH_KEY_B64: ${{ secrets.V2_SSH_PASSWORD }}
+        run: |
+          set -euo pipefail
 
-            # 1. Ingresar al proyecto clonado
-            cd /home/ubuntu/apps/imperio-global-back
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
 
-            # 2. Verificar el archivo de entorno
-            if [ ! -f .env ]; then
-              echo "ERROR: Falta configurar .env"
-              exit 1
-            fi
+          if [ -z "$SSH_KEY_B64" ]; then
+            echo "ERROR: Falta el secreto SSH del backend"
+            exit 1
+          fi
 
-            # 3. Actualizar codigo desde main
-            git fetch origin main
-            git reset --hard origin/main
+          printf '%s' "$SSH_KEY_B64" | base64 -d > ~/.ssh/imperio_back_deploy
+          chmod 600 ~/.ssh/imperio_back_deploy
 
-            # 4. Instalar dependencias Laravel
-            composer install \
-              --no-dev \
-              --optimize-autoloader \
-              --no-interaction \
-              --prefer-dist
+          ssh-keygen -y -f ~/.ssh/imperio_back_deploy > /dev/null
+          echo "Clave SSH valida"
 
-            # 5. Verificar el esquema existente
-            php artisan optimize:clear
-            php artisan mlm:deployment-check \
-              --production \
-              --database=imperio_bd
+          ssh-keyscan -T 10 -t ecdsa 205.234.243.127 \
+            > ~/.ssh/known_hosts 2>/dev/null
 
-            # 6. Permisos sin quitar propiedad a ubuntu
-            sudo chown -R ubuntu:www-data \
-              storage bootstrap/cache
+          ssh-keygen -lf ~/.ssh/known_hosts -E sha256 \
+            | awk '{print $2}' \
+            | grep -Fxq 'SHA256:zrXAwTBx3+1smpR+vc0Tjj78+jYk2gGitm4H/vxjos0'
 
-            sudo chmod -R ug+rwX \
-              storage bootstrap/cache
+          chmod 600 ~/.ssh/known_hosts
+          echo "Identidad del VPS verificada"
 
-            sudo chown ubuntu:www-data .env
-            sudo chmod 640 .env
+      - name: 3. Verificar conexion al VPS
+        run: |
+          ssh \
+            -i ~/.ssh/imperio_back_deploy \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o BatchMode=yes \
+            ubuntu@205.234.243.127 \
+            "echo 'Conexion SSH backend correcta'"
 
-            # 7. Reconstruir caches
-            php artisan optimize
+      - name: 4. Desplegar Laravel en V2Networks
+        run: |
+          ssh \
+            -i ~/.ssh/imperio_back_deploy \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o BatchMode=yes \
+            ubuntu@205.234.243.127 'bash -se' <<'REMOTE'
+          set -e
 
-            # 8. Reiniciar workers de Laravel
-            php artisan queue:restart
+          cd /home/ubuntu/apps/imperio-global-back
 
-            echo "Despliegue completado en V2Networks"
+          # Verificar configuracion
+          if [ ! -f .env ]; then
+            echo "ERROR: Falta archivo .env"
+            exit 1
+          fi
+
+          # Actualizar codigo desde GitHub
+          git fetch origin main
+          git reset --hard origin/main
+
+          # Instalar dependencias
+          composer install \
+            --no-dev \
+            --optimize-autoloader \
+            --no-interaction \
+            --prefer-dist
+
+          # Limpiar cache de Laravel
+          php artisan optimize:clear
+
+          # Verificar esquema existente
+          # No ejecuta migraciones
+          php artisan mlm:deployment-check \
+            --production \
+            --database=imperio_bd
+
+          # Mantener permisos de Laravel
+          sudo chown -R ubuntu:www-data storage bootstrap/cache
+          sudo chmod -R ug+rwX storage bootstrap/cache
+
+          sudo chown ubuntu:www-data .env
+          sudo chmod 640 .env
+
+          # Optimizar la aplicacion
+          php artisan optimize
+
+          # Notificar reinicio de workers
+          php artisan queue:restart
+
+          echo "BACKEND DESPLEGADO CORRECTAMENTE"
+          REMOTE
+
+      - name: 5. Verificar Laravel en el VPS
+        run: |
+          ssh \
+            -i ~/.ssh/imperio_back_deploy \
+            -o IdentitiesOnly=yes \
+            -o StrictHostKeyChecking=yes \
+            -o BatchMode=yes \
+            ubuntu@205.234.243.127 \
+            "cd /home/ubuntu/apps/imperio-global-back && php artisan --version"
+
+      - name: 6. Verificar HTTPS del backend
+        run: |
+          curl --fail --silent --show-error \
+            --output /dev/null \
+            https://vps.imperioglobal.org/
+
+          echo "BACKEND HTTPS RESPONDE CORRECTAMENTE"
+
+      - name: 7. Limpiar clave temporal
+        if: always()
+        run: |
+          rm -f ~/.ssh/imperio_back_deploy
