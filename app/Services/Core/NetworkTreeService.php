@@ -9,6 +9,7 @@ use App\Models\PaymentLog;
 use App\Models\SponsorRelation;
 use App\Models\PaymentProductOrder;
 use Carbon\Carbon;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 use RuntimeException;
 
@@ -37,6 +38,17 @@ class NetworkTreeService
         $query = SponsorRelation::where('user_code', $userCode)->where('state', true);
         if ($forUpdate) $query->lockForUpdate();
         return $query->first()?->sponsor_code;
+    }
+
+    public function sponsorCodes(array $userCodes): Collection
+    {
+        if (!$userCodes) {
+            return collect();
+        }
+
+        return SponsorRelation::whereIn('user_code', $userCodes)->where('state', true)
+            ->pluck('sponsor_code', 'user_code')
+            ->mapWithKeys(fn ($sponsor, $code) => [strtoupper((string) $code) => $sponsor]);
     }
     /**
      * Serialize mutations that can change the genealogy or calculate an
@@ -69,9 +81,10 @@ class NetworkTreeService
 
         $relationChildren = [];
         $relationParent = [];
-        foreach (SponsorRelation::where('state', true)->get([
+        $relations = SponsorRelation::where('state', true)->get([
             'user_code', 'sponsor_code', 'source',
-        ]) as $relation) {
+        ]);
+        foreach ($relations as $relation) {
             $child = strtoupper((string) $relation->user_code);
             $parent = strtoupper((string) $relation->sponsor_code);
             $relationChildren[$parent][$child] = [
@@ -90,7 +103,7 @@ class NetworkTreeService
             'unconnected_users' => [],
         ];
 
-        foreach (SponsorRelation::where('state', true)->get(['user_code', 'sponsor_code']) as $relation) {
+        foreach ($relations as $relation) {
             $child = strtoupper((string) $relation->user_code);
             $parent = strtoupper((string) $relation->sponsor_code);
             if (!isset($usersByCode[$child]) || !isset($usersByCode[$parent])) {
@@ -116,8 +129,9 @@ class NetworkTreeService
 
         $nodes = [];
         $edges = [];
-        $walk = function (string $code, ?string $parent, int $level, array $path) use (
-            &$walk, &$nodes, &$edges, &$integrity, $usersByCode, $childrenFor
+        $path = [];
+        $walk = function (string $code, ?string $parent, int $level) use (
+            &$walk, &$nodes, &$edges, &$integrity, &$path, $usersByCode, $childrenFor
         ): void {
             $key = strtoupper($code);
             if (isset($path[$key])) {
@@ -159,11 +173,12 @@ class NetworkTreeService
                     'level' => $level + 1,
                 ];
                 $nodes[$key]['children'][] = $child;
-                $walk($child, (string) $user->uuid, $level + 1, $path);
+                $walk($child, (string) $user->uuid, $level + 1);
             }
+            unset($path[$key]);
         };
 
-        $walk($root->uuid, null, 0, []);
+        $walk($root->uuid, null, 0);
 
         // A rooted snapshot must account for every persisted account. Keeping
         // out-of-network users explicit prevents a branch move from being
@@ -179,25 +194,20 @@ class NetworkTreeService
 
         // Detect cycles in active sponsor relations even when the cycle is
         // disconnected from corporativa configurada and therefore was not visited by the walk.
-        $knownCycles = [];
+        $checked = [];
         foreach (array_keys($relationParent) as $start) {
             $path = [];
             $cursor = $start;
-            while (isset($relationParent[$cursor])) {
+            while (isset($relationParent[$cursor]) && !isset($checked[$cursor])) {
                 if (isset($path[$cursor])) {
                     $cycle = array_slice(array_keys($path), $path[$cursor]);
-                    $signatureParts = $cycle;
-                    sort($signatureParts);
-                    $signature = implode(':', $signatureParts);
-                    if (!isset($knownCycles[$signature])) {
-                        $knownCycles[$signature] = true;
-                        $integrity['cycles'][] = $cycle;
-                    }
+                    $integrity['cycles'][] = $cycle;
                     break;
                 }
                 $path[$cursor] = count($path);
                 $cursor = $relationParent[$cursor];
             }
+            $checked += $path;
         }
 
         $integrity['multiple_parents'] = array_map(
@@ -248,6 +258,34 @@ class NetworkTreeService
         }
 
         return false;
+    }
+
+    public function descendantCodes(string $rootCode): array
+    {
+        $queue = [$rootCode];
+        $seen = [strtoupper($rootCode) => true];
+        $descendants = [];
+
+        while ($queue) {
+            $next = [];
+            foreach (array_chunk($queue, 500) as $parents) {
+                $relations = SponsorRelation::where('state', true)->whereIn('sponsor_code', $parents)
+                    ->get(['user_code']);
+                foreach ($relations as $relation) {
+                    $code = $relation->user_code;
+                    $key = strtoupper($code);
+                    if (isset($seen[$key])) {
+                        continue;
+                    }
+                    $seen[$key] = true;
+                    $next[] = $code;
+                    $descendants[] = $code;
+                }
+            }
+            $queue = $next;
+        }
+
+        return $descendants;
     }
 
     public function getAllNetworkUsers($userCode, &$visited = [])

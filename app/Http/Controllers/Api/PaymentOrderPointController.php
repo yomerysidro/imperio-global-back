@@ -232,10 +232,7 @@ class PaymentOrderPointController extends BaseController
                         $item->user_code, $allPointsTable, $allProductPoints,
                         $from->month, $from->year, $includeClosed
                     );
-                    $item->totalPoints = $this->calculator->pointsTotal(
-                        $item->user_code, $allPointsTable, $allProductPoints,
-                        $from->month, $from->year, $includeClosed
-                    );
+                    $item->totalPoints = $this->calculator->volumeTotal($item->points);
                 }
                 return $item;
             });
@@ -288,13 +285,11 @@ class PaymentOrderPointController extends BaseController
                     $userModel->uuid, $combinedPoints, $allProductPoints,
                     $mesFiltro, $anioFiltro, $isGracePeriod
                 );
-                $userModel->totalPoints = $this->calculator->pointsTotal(
-                    $userModel->uuid, $combinedPoints, $allProductPoints,
-                    $mesFiltro, $anioFiltro, $isGracePeriod
-                );
+                $userModel->totalPoints = $this->calculator->volumeTotal($userModel->points);
             }
 
-            $pointsByCode = $networkPoints->keyBy(fn ($item) => strtoupper((string) $item->user_code));
+            $serializedPoints = $networkPoints->map(fn ($item) => $item->toArray())->values();
+            $pointsByCode = $serializedPoints->keyBy(fn (array $item) => strtoupper((string) $item['user_code']));
             $childrenByParent = [];
             foreach ($parentByChild as $childCode => $parentCode) {
                 $childrenByParent[strtoupper((string) $parentCode)][] = $childCode;
@@ -305,9 +300,9 @@ class PaymentOrderPointController extends BaseController
                 $item = $pointsByCode->get($key);
                 if (!$item) return null;
                 $path[$key] = true;
-                $node = $item->toArray();
-                $node['uuid'] = $item->user_code;
-                $node['parent_uuid'] = $item->sponsor_code;
+                $node = $item;
+                $node['uuid'] = $item['user_code'];
+                $node['parent_uuid'] = $item['sponsor_code'];
                 $node['children'] = [];
                 foreach ($childrenByParent[$key] ?? [] as $childCode) {
                     $childNode = $buildNode($childCode, $path);
@@ -327,7 +322,7 @@ class PaymentOrderPointController extends BaseController
             }
 
             return $this->sendResponse([
-                'points' => $networkPoints->values(), 'user' => $userModel,
+                'points' => $serializedPoints, 'user' => $userModel,
                 'network_tree' => $root,
                 'network_meta' => [
                     ...$networkMetrics,

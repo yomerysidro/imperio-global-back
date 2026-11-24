@@ -29,6 +29,55 @@ class DynamicNetworkTest extends TestCase
             'email' => $name.'@example.test', 'password' => 'test-password-long', 'is_admin' => $name === 'company']);
     }
 
+    public function test_snapshot_reads_sponsor_relations_once_and_keeps_the_parent(): void
+    {
+        $root = $this->account('snapshot-root');
+        $child = $this->account('snapshot-child');
+        SponsorRelation::create([
+            'user_code' => $child->uuid,
+            'sponsor_code' => $root->uuid,
+            'source' => 'registration',
+            'state' => true,
+        ]);
+
+        DB::flushQueryLog();
+        DB::enableQueryLog();
+        try {
+            $snapshot = app(NetworkTreeService::class)->snapshotFromRoot($root->uuid);
+            $relationReads = collect(DB::getQueryLog())
+                ->filter(fn ($query) => str_contains($query['query'], 'ig_sponsor_relations'));
+        } finally {
+            DB::disableQueryLog();
+            DB::flushQueryLog();
+        }
+
+        $this->assertCount(1, $relationReads);
+        $this->assertSame($root->uuid, $snapshot['nodes'][strtoupper($child->uuid)]['parent_code']);
+    }
+
+    public function test_member_list_preserves_page_sponsor_and_package_fields(): void
+    {
+        $admin = $this->account('company');
+        $member = $this->account('performance-member');
+        config(['mlm.root_uuid' => $admin->uuid]);
+        SponsorRelation::create([
+            'user_code' => $member->uuid,
+            'sponsor_code' => $admin->uuid,
+            'source' => 'registration',
+            'state' => true,
+        ]);
+        Passport::actingAs($admin);
+
+        $this->getJson('/api/v1/users/find-all?code='.$member->uuid.'&limit=1')
+            ->assertOk()
+            ->assertJsonPath('data.pagination.total', 1)
+            ->assertJsonPath('data.items.0.uuid', $member->uuid)
+            ->assertJsonPath('data.items.0.sponsor.uuid', $admin->uuid)
+            ->assertJsonPath('data.items.0.package_name', 'Sin paquetes registrados')
+            ->assertJsonPath('data.items.0.packs_by_category.product.owned', false)
+            ->assertJsonPath('data.items.0.packs_by_category.service.owned', false);
+    }
+
     public function test_registration_under_moved_member_is_immediate_and_repeat_does_not_duplicate(): void
     {
         $root = $this->account('company'); $a = $this->account('a'); $b = $this->account('b');

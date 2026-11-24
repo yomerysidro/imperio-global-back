@@ -8,6 +8,7 @@ use App\Models\RangeUser;
 use App\Models\User;
 use App\Models\PaymentLog;
 use App\Models\PaymentProductOrderPoint;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 
 class RangeQualificationService
@@ -29,8 +30,7 @@ class RangeQualificationService
         $this->rankActiveCache = [];
         $this->directCodesCache = [];
         $this->networkCodesCache = [];
-        $rules = RangeRule::with(['range', 'requirements.requiredRange'])
-            ->where('state', true)->get()->sortBy('range.order')->values();
+        $rules = $this->activeRules();
         $rootUuid = app(CorporateRootService::class)->uuid();
         $users = User::where('is_admin', false)->orWhere('uuid', $rootUuid)->get();
         [$from, $to] = app(ActivationService::class)->visiblePeriod();
@@ -42,7 +42,7 @@ class RangeQualificationService
         foreach ($users as $user) {
             $key = strtoupper($user->uuid);
             $this->activeCache[$key] = app(ActivationService::class)->isActive($user);
-            $this->rankActiveCache[$key] = app(ActivationService::class)->hasRankActivity($user);
+            $this->rankActiveCache[$key] = app(ActivationService::class)->hasRankActivity($user, $this->activeCache[$key]);
         }
         return DB::transaction(function () use ($rules, $users, $groupPoints) {
             RangeUser::whereIn('user_id', $users->pluck('id'))
@@ -60,20 +60,27 @@ class RangeQualificationService
         });
     }
 
-    public function recalculateUser(User $user): ?RangeUser
+    public function activeRules(): Collection
+    {
+        return RangeRule::with(['range', 'requirements.requiredRange'])
+            ->where('state', true)->get()->sortBy('range.order')->values();
+    }
+
+    public function recalculateUser(User $user, ?Collection $rules = null, ?bool $isActive = null): ?RangeUser
     {
         ActivationService::clearCache();
-        $this->activeCache[strtoupper($user->uuid)] = app(ActivationService::class)->isActive($user);
-        $this->rankActiveCache[strtoupper($user->uuid)] = app(ActivationService::class)->hasRankActivity($user);
-        [$from, $to] = app(ActivationService::class)->visiblePeriod();
-        $isGracePeriod = app(ActivationService::class)->isMonthlyGracePeriod();
+        $activation = app(ActivationService::class);
+        $key = strtoupper($user->uuid);
+        $this->activeCache[$key] = $isActive ?? $activation->isActive($user);
+        $this->rankActiveCache[$key] = $activation->hasRankActivity($user, $this->activeCache[$key]);
+        [$from, $to] = $activation->visiblePeriod();
+        $isGracePeriod = $activation->isMonthlyGracePeriod();
         $points = (float) PaymentOrderPoint::where('user_code', $user->uuid)
             ->whereIn('type', [PaymentOrderPoint::COMPRA, PaymentOrderPoint::GRUPAL])
             ->when(!$isGracePeriod, fn ($query) => $query->where('state', true))
             ->whereBetween('created_at', [$from, $to])->sum('point');
         $qualifiedRule = null;
-        foreach (RangeRule::with(['range', 'requirements.requiredRange'])
-            ->where('state', true)->get()->sortBy('range.order') as $rule) {
+        foreach ($rules ?? $this->activeRules() as $rule) {
             if ($this->qualifies($user, $rule, $points)) $qualifiedRule = $rule;
         }
 

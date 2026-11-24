@@ -62,6 +62,14 @@ class User extends Authenticatable
     }
     public function getPackageNameAttribute()
     {
+        return $this->packageNameFromPurchases();
+    }
+
+    public function packageNameFromPurchases(
+        ?\Illuminate\Support\Collection $services = null,
+        ?\Illuminate\Support\Collection $products = null
+    ): string
+    {
         if (app(\App\Services\Core\CorporateRootService::class)->isRootCode($this->uuid)) {
             return 'Corporativo';
         }
@@ -80,7 +88,7 @@ class User extends Authenticatable
         
         // El pack adquirido es permanente. RESET cierra puntos o vigencia, no
         // elimina la compra ni el derecho a conservar el pack y su descuento.
-        $services = PaymentLog::with('paymentOrder.pack')
+        $services ??= PaymentLog::with('paymentOrder.pack')
             ->where('user_id', $this->id)
             ->whereIn('state', [PaymentLog::PAGADO, PaymentLog::TERMINADO, PaymentLog::RESET])
             ->orderBy('created_at')
@@ -93,7 +101,7 @@ class User extends Authenticatable
         }
 
         // 2. Packs de Productos (Estado 2, 3 o 6)
-        $products = PaymentProductOrder::with('pack')
+        $products ??= PaymentProductOrder::with('pack')
             ->where('user_id', $this->id)
             ->whereIn('state', [
                 PaymentProductOrder::PAGADO,

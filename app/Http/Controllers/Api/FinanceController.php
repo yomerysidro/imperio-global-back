@@ -146,11 +146,7 @@ class FinanceController extends BaseController
             // El cierre desactiva B/G, pero el Excel del ciclo cerrado debe
             // conservar ese volumen. En el mes abierto sí se excluyen bajas.
             ->when($isCurrentPeriod, fn ($query) => $query->where('state', true))
-            ->get();
-        $paymentProductOrderPoints = PaymentProductOrderPoint::whereMonth('created_at', $month)
-            ->whereYear('created_at', $year)
-            ->when($isCurrentPeriod, fn ($query) => $query->where('state', true))
-            ->get();
+            ->get()->groupBy(fn ($point) => strtoupper($point->user_code));
         $ranges                    = Range::where("state", true)->orderBy('points', 'asc')->get();
         $ledger                    = app(FinancialLedgerService::class);
         // El reporte de un ciclo ya cerrado conserva sus ganancias aunque el
@@ -183,8 +179,8 @@ class FinanceController extends BaseController
 
             $calculator = $this->pointCalculator->points(
                 $user->uuid,
-                $paymentOrderPoints,
-                $paymentProductOrderPoints->where('user_id', $user->id)
+                $paymentOrderPoints->get(strtoupper($user->uuid), collect()),
+                collect()
             );
             $payout = $payoutSummaries->get($user->id);
             $commissions = $payout['commissions'];
@@ -452,22 +448,30 @@ class FinanceController extends BaseController
             }
 
             if ($request->has('name') && !empty($request->query('name'))) {
-                $userNameCurrentIds = User::where("name", "like", "%" . $request->query('name') . "%")->pluck('id')->toArray();
                 $paymentOrders      = $paymentOrders->whereIn("user_id", $userNameCurrentIds);
             }
 
             $paymentUnion = $paymentProductOrderList->union($paymentOrders);
             $paymentUnion = $paymentUnion->orderBy('created_at', 'desc')->paginate($limit);
 
-            foreach ($paymentUnion as $key => $payment) {
-                $paymentUnion[$key]->user    = User::with(['file'])->find($payment->user_id);
-                $paymentUnion[$key]->details = PaymentProductOrderDetail::where('payment_product_order_id', $payment->id)->get();
-                if (empty($payment->pack_id)) {
-                    $payment_order            = PaymentOrder::with(['pack'])->find($payment->payment_order_id);
-                    $paymentUnion[$key]->pack = $payment_order?->pack;
-                } else {
-                    $paymentUnion[$key]->pack = Pack::find($payment->pack_id);
-                }
+            $payments = $paymentUnion->getCollection();
+            $users = User::with('file')->whereKey($payments->pluck('user_id')->filter()->unique()->all())
+                ->get()->keyBy('id');
+            $details = PaymentProductOrderDetail::whereIn('payment_product_order_id', $payments->pluck('id')->unique()->all())
+                ->get()->groupBy('payment_product_order_id');
+            $orders = PaymentOrder::with('pack')
+                ->whereKey($payments->filter(fn ($payment) => empty($payment->pack_id))
+                    ->pluck('payment_order_id')->filter()->unique()->all())
+                ->get()->keyBy('id');
+            $packs = Pack::whereKey($payments->pluck('pack_id')->filter()->unique()->all())
+                ->get()->keyBy('id');
+
+            foreach ($payments as $payment) {
+                $payment->user = $users->get($payment->user_id);
+                $payment->details = $details->get($payment->id, collect());
+                $payment->pack = empty($payment->pack_id)
+                    ? $orders->get($payment->payment_order_id)?->pack
+                    : $packs->get($payment->pack_id);
             }
 
             return $this->sendResponse(new PaginationCollection($paymentUnion), $userNameCurrentIds);
@@ -518,7 +522,7 @@ class FinanceController extends BaseController
                         $paymentProductOrderPoints = PaymentProductOrderPoint::where("user_id", $_user->id)->where("state", true)->get();
 
                         $calculator      = $this->pointCalculator->points($_user->uuid, $paymentOrderPoints, $paymentProductOrderPoints);
-                        $calculatorPoint = $this->pointCalculator->pointsTotal($_user->uuid, $paymentOrderPoints, $paymentProductOrderPoints);
+                        $calculatorPoint = $calculator->personal + $calculator->pointGroup;
                         $commissions     = $ledgerService->summary($from, $to, $_user->uuid);
 
                         array_push($jsonBody, (object) [
@@ -649,7 +653,7 @@ class FinanceController extends BaseController
                     $paymentProductOrderPoints = PaymentProductOrderPoint::where("user_id", $user->id)->where("state", true)->get();
 
                     $calculator           = $this->pointCalculator->points($user->uuid, $paymentOrderPoints, $paymentProductOrderPoints);
-                    $calculatorTotalPoint = $this->pointCalculator->pointsTotal($user->uuid, $paymentOrderPoints, $paymentProductOrderPoints);
+                    $calculatorTotalPoint = $calculator->personal + $calculator->pointGroup;
                     $commissions          = $ledgerService->summary($from, $to, $user->uuid);
 
                     $jsonBody = [
