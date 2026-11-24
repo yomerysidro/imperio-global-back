@@ -33,7 +33,7 @@ class OptionController extends BaseController
     public function search( Request $request )
     {
         try {
-            $optionList = Option::with([]);
+            $optionList = Option::where('option_key', 'not like', Option::ASSIGNED_PACK_PREFIX.'%');
 
             if( $request->has('key') ) $optionList = $optionList->where("option_key"  ,  $request->query('key')  );
 
@@ -52,6 +52,10 @@ class OptionController extends BaseController
     {
         try {
             $dataBody = (object) $request->all();
+
+            if (str_starts_with(strtolower(trim((string) ($dataBody->option_key ?? ''))), Option::ASSIGNED_PACK_PREFIX)) {
+                return $this->sendError('Clave reservada.', [], 422);
+            }
 
             $option = Option::create(array(
                 'option_key' => $dataBody->option_key,

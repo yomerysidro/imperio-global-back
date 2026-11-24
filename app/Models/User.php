@@ -39,6 +39,7 @@ class User extends Authenticatable
     protected $hidden = [
         'password',
         'remember_token',
+        'assignedPackOption',
     ];
 
     /**
@@ -60,6 +61,30 @@ class User extends Authenticatable
     {
         return app(\App\Services\Core\ActivationService::class)->isActive($this);
     }
+    public function getAssignedPackKeyAttribute(): string
+    {
+        return Option::ASSIGNED_PACK_PREFIX.$this->id;
+    }
+
+    public function assignedPackOption()
+    {
+        return $this->hasOne(Option::class, 'option_key', 'assigned_pack_key')
+            ->whereRaw('BINARY LEFT(option_key, ?) = ?', [
+                strlen(Option::ASSIGNED_PACK_PREFIX), Option::ASSIGNED_PACK_PREFIX,
+            ]);
+    }
+
+    public function getAssignedPackAttribute(): ?Pack
+    {
+        return $this->exists ? $this->assignedPackOption?->pack : null;
+    }
+
+    public function assignPack(Pack $pack): void
+    {
+        $this->assignedPackOption()->updateOrCreate([], ['option_value' => $pack->id]);
+        $this->unsetRelation('assignedPackOption');
+    }
+
     public function getPackageNameAttribute()
     {
         return $this->packageNameFromPurchases();
@@ -70,6 +95,7 @@ class User extends Authenticatable
         $names = [];
         foreach (collect($users)->filter()->unique('id')->chunk(500) as $batch) {
             $ids = $batch->pluck('id');
+            (new \Illuminate\Database\Eloquent\Collection($batch->all()))->loadMissing('assignedPackOption.pack');
             $services = PaymentLog::with('paymentOrder:id,pack_id', 'paymentOrder.pack:id,title,category')
                 ->whereIn('user_id', $ids)
                 ->whereIn('state', [PaymentLog::PAGADO, PaymentLog::TERMINADO, PaymentLog::RESET])
@@ -97,6 +123,10 @@ class User extends Authenticatable
     {
         if (app(\App\Services\Core\CorporateRootService::class)->isRootCode($this->uuid)) {
             return 'Corporativo';
+        }
+
+        if ($assigned = $this->assignedPack) {
+            return $assigned->title;
         }
 
         $packagesByCategory = [];
