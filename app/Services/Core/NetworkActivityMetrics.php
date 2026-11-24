@@ -12,24 +12,34 @@ class NetworkActivityMetrics
     ) {}
 
     /** Counts are based on the current sponsor graph; the root is excluded. */
-    public function forUser(User $root, ?array $descendantCodes = null): array
+    public function forUser(
+        User $root,
+        ?array $descendantCodes = null,
+        ?array $directCodes = null,
+        array $knownActivity = []
+    ): array
     {
         $codes = $descendantCodes ?? $this->tree->descendantCodes($root->uuid);
-        $directCodes = $this->tree->directUserCodes($root->uuid);
+        $directCodes ??= $this->tree->directUserCodes($root->uuid);
         $directLookup = array_fill_keys(array_map('strtoupper', $directCodes), true);
         $directActive = 0;
         $networkActive = 0;
-        foreach (array_chunk($codes, 500) as $batch) {
+        $pending = array_filter($codes, fn ($code) => !array_key_exists(strtoupper($code), $knownActivity));
+        foreach (array_chunk($pending, 500) as $batch) {
             $members = User::whereIn('uuid', $batch)->get(['id', 'uuid', 'is_admin'])
                 ->keyBy(fn (User $member) => strtoupper($member->uuid));
+            $activity = $this->activation->activityForUsers($members);
             foreach ($batch as $code) {
                 $key = strtoupper($code);
                 $member = $members->get($key);
-                if (!$member || !$this->activation->isActive($member)) continue;
+                $knownActivity[$key] = $member ? $activity[$member->id] : false;
+            }
+        }
+        foreach ($codes as $code) {
+            $key = strtoupper($code);
+            if ($knownActivity[$key]) {
                 $networkActive++;
-                if (isset($directLookup[$key])) {
-                    $directActive++;
-                }
+                $directActive += (int) isset($directLookup[$key]);
             }
         }
 

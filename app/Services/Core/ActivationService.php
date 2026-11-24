@@ -32,6 +32,74 @@ class ActivationService
         return false;
     }
 
+    /** Evaluate the standard activation rule for a page or branch in batches. */
+    public function activityForUsers(iterable $users): array
+    {
+        $activity = [];
+        $pending = [];
+        $root = app(CorporateRootService::class);
+        foreach ($users as $user) {
+            $activity[$user->id] = $user->is_admin || $root->isRootCode($user->uuid);
+            if (!$activity[$user->id]) {
+                $pending[$user->id] = $user->id;
+            }
+        }
+        if (!$pending) {
+            return $activity;
+        }
+
+        $manualPeriod = now()->startOfMonth()->toDateString();
+        $now = Carbon::now('America/Lima');
+        $rules = ActivationRule::where('state', true)->get();
+        foreach (array_chunk($pending, 500) as $ids) {
+            $manual = ManualReactivation::whereIn('user_id', $ids)->where('period', $manualPeriod)
+                ->where('state', ManualReactivation::ACTIVE)->pluck('user_id')->all();
+            $current = $this->qualifiedUsers(array_diff($ids, $manual), $now, false, $rules);
+            $active = [...$manual, ...$current];
+            if ($this->isMonthlyGracePeriod($now)) {
+                $active = [...$active, ...$this->qualifiedUsers(
+                    array_diff($ids, $active), $now->copy()->subMonthNoOverflow(), true, $rules
+                )];
+            }
+            foreach ($active as $id) {
+                $activity[$id] = true;
+            }
+        }
+        return $activity;
+    }
+
+    private function qualifiedUsers(array $ids, CarbonInterface $month, bool $includeClosed, $rules): array
+    {
+        if (!$ids || $rules->isEmpty()) {
+            return [];
+        }
+
+        $period = [$month->copy()->startOfMonth(), $month->copy()->endOfMonth()];
+        $logStates = $includeClosed ? [PaymentLog::PAGADO, PaymentLog::TERMINADO] : [PaymentLog::PAGADO];
+        $orderStates = $includeClosed
+            ? [PaymentProductOrder::PAGADO, PaymentProductOrder::ENVIADO, PaymentProductOrder::TERMINADO]
+            : [PaymentProductOrder::PAGADO, PaymentProductOrder::ENVIADO];
+        $prefix = DB::getTablePrefix();
+        $service = DB::table('payment_logs as logs')->join('payment_orders as orders', 'orders.id', '=', 'logs.payment_order_id')
+            ->join('packs', 'packs.id', '=', 'orders.pack_id')->whereIn('logs.user_id', $ids)
+            ->whereIn('logs.state', $logStates)->whereBetween('logs.created_at', $period)
+            ->select('logs.user_id')
+            ->selectRaw("SUM({$prefix}packs.points) points, SUM(CASE WHEN {$prefix}orders.amount > 0 THEN {$prefix}orders.amount ELSE {$prefix}packs.price END) amount")
+            ->groupBy('logs.user_id')->get()->keyBy('user_id');
+        $orders = DB::table('payment_product_orders as orders')->whereIn('orders.user_id', $ids)
+            ->whereIn('orders.state', $orderStates)->whereBetween('orders.created_at', $period);
+        $product = (clone $orders)->select('orders.user_id')
+            ->selectRaw("SUM({$prefix}orders.points) points, SUM({$prefix}orders.amount) amount")
+            ->groupBy('orders.user_id')->get()->keyBy('user_id');
+        $counts = $orders->join('payment_product_order_details as details', 'details.payment_product_order_id', '=', 'orders.id')
+            ->select('orders.user_id')->selectRaw("SUM({$prefix}details.quantity) products")
+            ->groupBy('orders.user_id')->pluck('products', 'user_id');
+
+        return array_values(array_filter($ids, fn ($id) => $this->meetsActivationRules(
+            $rules, $service->get($id), $product->get($id), (int) $counts->get($id, 0)
+        )));
+    }
+
     public function isActiveForCategory(User $user, string $category): bool
     {
         $now = Carbon::now('America/Lima');
@@ -223,13 +291,19 @@ class ActivationService
             ->whereIn('orders.state', $productStates)
             ->whereBetween('orders.created_at', [$from, $to])
             ->selectRaw("COALESCE(SUM({$prefix}details.quantity), 0) products")->first();
-        $products = (int) ($productCount->products ?? 0);
+        return self::$activeCache[$cacheKey] = $this->meetsActivationRules(
+            $rules, $service, $product, (int) ($productCount->products ?? 0)
+        );
+    }
+
+    private function meetsActivationRules($rules, ?object $service, ?object $product, int $products): bool
+    {
         $servicePoints = (float) ($service->points ?? 0);
         $serviceAmount = (float) ($service->amount ?? 0);
         $productPoints = (float) ($product->points ?? 0);
         $productAmount = (float) ($product->amount ?? 0);
 
-        return self::$activeCache[$cacheKey] = $rules->contains(function (ActivationRule $rule) use (
+        return $rules->contains(function (ActivationRule $rule) use (
             $servicePoints, $serviceAmount, $productPoints, $productAmount, $products
         ) {
             // Un paquete activa por sus puntos y valor configurado. Una compra
