@@ -13,6 +13,7 @@ use App\Models\SponsorRelation;
 use App\Models\PaymentProductOrderPoint;
 use App\Services\Core\Calculator;
 use App\Services\Core\NetworkTreeService;
+use App\Services\Core\RangeQualificationService;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Exception;
@@ -199,7 +200,7 @@ class PaymentOrderPointController extends BaseController
                 ->where('created_at', '>=', $monthlyFrom)->where('created_at', '<', $monthlyTo)
                 ->get(['created_at', 'state', 'points']);
 
-            [$visibleFrom] = $activation->visiblePeriod($now);
+            [$visibleFrom, $visibleTo] = $activation->visiblePeriod($now);
             $rootProductVolume = $this->calculator->productVolume($allProductPoints, $mesFiltro, $anioFiltro, $isGracePeriod);
             $nodeProductVolume = $visibleFrom->month === $mesFiltro && $visibleFrom->year === $anioFiltro
                 ? $rootProductVolume
@@ -301,14 +302,20 @@ class PaymentOrderPointController extends BaseController
                     "patrocinioServicio" => 0,
                     "residualServicio" => 0
                 ];
-                $userModel->totalPoints = 0;
             } else {
                 $userModel->points = $this->calculator->pointsForKnownUser(
                     $userModel->uuid, $combinedPoints, $rootProductVolume,
                     $mesFiltro, $anioFiltro, $isGracePeriod
                 );
-                $userModel->totalPoints = $this->calculator->volumeTotal($userModel->points);
             }
+            $volume = app(RangeQualificationService::class)
+                ->volumeBreakdownFor($userModel, $visibleFrom, $visibleTo, $isGracePeriod, $allDownlineCodes);
+            $rootPoints = $userModel->points;
+            $rootPoints->personal = $rootPoints->puntos_personales = $volume['personal'];
+            $rootPoints->pointGroup = $rootPoints->puntos_red = $volume['network'];
+            $rootPoints->compra->total_puntos = $volume['personal'];
+            $rootPoints->total_general = $userModel->totalPoints = $volume['total'];
+            $userModel->points = $rootPoints;
 
             $packageNames = User::packageNamesFor($profiles);
             $serializeProfile = function (?User $profile) use ($packageNames, $activityById): ?array {

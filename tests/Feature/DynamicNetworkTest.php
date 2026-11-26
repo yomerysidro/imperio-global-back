@@ -220,7 +220,7 @@ class DynamicNetworkTest extends TestCase
             'points' => 995, 'category' => 'Producto', 'state' => true, 'discount' => 0]);
         $order = \App\Models\PaymentOrder::create(['currency' => 'PEN', 'amount' => 100,
             'pack_id' => $pack->id, 'sponsor_code' => $root->uuid, 'token' => 'fixture-'.\Illuminate\Support\Str::uuid()]);
-        foreach ([[$buyer, 'B', 995], [$buyer, 'B', 995], [$root, 'G', 1005], [$root, 'P', 50]] as [$user, $type, $points]) {
+        foreach ([[$buyer, 'B', 995], [$buyer, 'B', 995], [$root, 'G', 1045], [$root, 'P', 50]] as [$user, $type, $points]) {
             \App\Models\PaymentOrderPoint::create(['payment_order_id' => $order->id,
                 'user_code' => $user->uuid, 'sponsor_code' => $root->uuid, 'user_id' => $user->id,
                 'type' => $type, 'point' => $points, 'state' => true, 'payment' => false]);
@@ -238,6 +238,17 @@ class DynamicNetworkTest extends TestCase
         $this->assertNull($engine->qualifiedRuleFor($root, $volume, collect([$rule])));
         $this->assertNull($engine->recalculateUser($root, collect([$rule])));
         $this->assertNull($root->range()->first());
+
+        Passport::actingAs($root);
+        $this->getJson('/api/v1/users/'.$root->id)
+            ->assertOk()
+            ->assertJsonPath('data.user_detail.puntos_personales', 0)
+            ->assertJsonPath('data.user_detail.puntos_red', 995)
+            ->assertJsonPath('data.user_detail.total_puntos', 995);
+        $this->getJson('/api/v1/points/users')
+            ->assertOk()
+            ->assertJsonPath('data.user.points.pointGroup', 995)
+            ->assertJsonPath('data.user.totalPoints', 995);
     }
 
     public function test_new_commission_uses_current_eligible_chain_and_retry_preserves_distribution(): void

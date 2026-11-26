@@ -106,30 +106,23 @@ class UserController extends BaseController
             // =========================================================
             // 🔥 CÁLCULO DE PUNTOS (EXACTO AL DE auth())
             // =========================================================
-            $paymentOrderPoints = PaymentOrderPoint::query()
+            $paymentOrderPointsUser = PaymentOrderPoint::query()
+                ->whereRaw('UPPER(user_code) = ?', [strtoupper($user->uuid)])
                 ->when(!$isGracePeriod, fn ($query) => $query->where('state', 1))
                 ->whereMonth('created_at', $mesFiltro)
                 ->whereYear('created_at', $anioFiltro)
-                ->whereIn('type', ['B', 'G', 'R', 'RS', 'P', 'PS', 'S', 'I'])
+                ->whereIn('type', ['R', 'RS', 'P', 'PS', 'S', 'I'])
                 ->get();
 
-            $paymentProductOrderPoints = PaymentProductOrderPoint::where("user_id", $user->id)
-                ->when(!$isGracePeriod, fn ($query) => $query->where("state", true))
-                ->whereMonth('created_at', $mesFiltro)
-                ->whereYear('created_at', $anioFiltro)
-                ->get();
-
-            $paymentOrderPointsUser = $paymentOrderPoints->filter(function ($point) use ($user) {
-                return strtoupper($point->user_code) == strtoupper($user->uuid);
-            })->values();
-
-            $puntosPersonales = $paymentOrderPointsUser->where('type', 'B')->sum('point');
-            $puntosRed        = $paymentOrderPointsUser->where('type', 'G')->sum('point');
+            $qualification = app(RangeQualificationService::class);
+            [$rankFrom, $rankTo] = app(ActivationService::class)->visiblePeriod($now);
+            ['personal' => $puntosPersonales, 'network' => $puntosRed, 'total' => $totalPoints] =
+                $qualification->volumeBreakdownFor($user, $rankFrom, $rankTo, $isGracePeriod);
+            $currentRange = $qualification->qualifiedRuleFor($user, $totalPoints, isActive: $isActive)?->range;
+            $user->current_range = $currentRange?->load('file');
             $puntosResiduales = $this->commissionTotal($paymentOrderPointsUser, ['R', 'RS']);
             $gananciaPatrocinio = $this->sponsorshipTotal($paymentOrderPointsUser);
             $puntosInfinito   = $paymentOrderPointsUser->where('type', 'I')->sum('point');
-
-            $totalPoints = $puntosPersonales + $puntosRed;
 
             // 🔥 CONSTRUIR OBJETO DE PUNTOS
             $user->points = (object) [
@@ -242,7 +235,7 @@ class UserController extends BaseController
                 'puntos_residuales'   => $puntosResiduales,
                 'total_puntos'        => $totalPoints,
                 'paquete_actual'      => $user->package_name ?? 'Sin paquete',
-                'rango_actual'        => $user->range?->range?->title ?? 'Sin rango'
+                'rango_actual'        => $currentRange?->title ?? 'Sin rango'
             ];
 
             // Network cards use the live sponsor graph, independently of
@@ -367,8 +360,6 @@ class UserController extends BaseController
 
 
         // 🔥 CORRECCIÓN 3: CALCULAR PUNTOS POR TIPO (Todos los tipos)
-        $puntosPersonales = $paymentOrderPointsUser->where('type', 'B')->sum('point'); // COMPRA
-        $puntosRed        = $paymentOrderPointsUser->where('type', 'G')->sum('point'); // GRUPAL
         $residualProducto = $this->commissionTotal($paymentOrderPointsUser, ['R']);
         $residualServicio = $this->commissionTotal($paymentOrderPointsUser, ['RS']);
         $puntosResiduales = $residualProducto + $residualServicio;
@@ -397,7 +388,8 @@ class UserController extends BaseController
         [$rankFrom, $rankTo] = app(ActivationService::class)->visiblePeriod($now);
         $isCorporateRoot = app(\App\Services\Core\CorporateRootService::class)->isRootCode($userModel->uuid);
         $descendantCodes = $isCorporateRoot ? $this->networkTreeService->descendantCodes($userModel->uuid) : null;
-        $totalPoints = $rangeQualification->volumeFor($userModel, $rankFrom, $rankTo, $isGracePeriod, $descendantCodes);
+        ['personal' => $puntosPersonales, 'network' => $puntosRed, 'total' => $totalPoints] =
+            $rangeQualification->volumeBreakdownFor($userModel, $rankFrom, $rankTo, $isGracePeriod, $descendantCodes);
         $totalComisiones = $gananciaPatrocinio + $puntosResiduales + $puntosInfinito;
 
         // Las invitaciones antiguas no representan socios activos ni deben
@@ -407,8 +399,6 @@ class UserController extends BaseController
         // 🔥 CORRECCIÓN 5: LÓGICA PARA la raíz corporativa (CORPORATIVO)
         if ($isCorporateRoot) {
             $monthlyGroupVolume = $totalPoints;
-            $puntosPersonales = 0;
-            $puntosRed = $monthlyGroupVolume;
 
             // Se conserva la clave por compatibilidad con el frontend, pero
             // nunca se mezcla el acumulado historico con el periodo actual.
