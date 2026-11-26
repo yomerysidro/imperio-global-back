@@ -486,12 +486,14 @@ class UserController extends BaseController
         app(RangeQualificationService::class)->recalculateUser($userModel, isActive: $isActive);
         $userModel->load('range.range.rule');
         $rangeCurrent = $userModel->range?->range;
-        $nextRange = Range::where('state', true)
+        $nextRange = Range::with('rule')->where('state', true)
             ->when($rangeCurrent, fn ($query) => $query->where('order', '>', $rangeCurrent->order))
             ->orderBy('order')->first();
         $progressTarget = $nextRange ?: $rangeCurrent;
-        $rangeProgress = $progressTarget && (float) $progressTarget->points > 0
-            ? min(100, round(((float) $totalPoints / (float) $progressTarget->points) * 100, 2))
+        $requiredPoints = (float) ($progressTarget?->rule?->required_points ?? $progressTarget?->points ?? 0);
+        $remainingPoints = max(0, $requiredPoints - (float) $totalPoints);
+        $rangeProgress = $requiredPoints > 0
+            ? ($remainingPoints > 0 ? min(99.99, max(0, round($totalPoints / $requiredPoints * 100, 2))) : 100)
             : 0;
 
         $responsePayload = $userModel->setAppends([])->toArray() + [
@@ -531,9 +533,7 @@ class UserController extends BaseController
         $responsePayload['current_range'] = $rangeCurrent;
         $responsePayload['next_range'] = $nextRange;
         $responsePayload['range_progress'] = $rangeProgress;
-        $responsePayload['points_to_next_range'] = $nextRange
-            ? max(0, (float) $nextRange->points - (float) $totalPoints)
-            : 0;
+        $responsePayload['points_to_next_range'] = $nextRange ? $remainingPoints : 0;
 
         $responsePayload['gender'] = $userModel->genger;
 
