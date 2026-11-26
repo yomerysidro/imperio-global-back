@@ -351,6 +351,8 @@ class DynamicNetworkTest extends TestCase
         $this->assertDatabaseHas('sponsor_relations', ['user_code' => $child->uuid, 'sponsor_code' => $a->uuid]);
         $this->assertDatabaseHas('network_move_audits', ['user_code' => $a->uuid, 'new_sponsor_code' => $b->uuid]);
         $this->getJson('/api/v1/admin/network/genealogy?perPage=2')->assertOk()->assertJsonPath('total', 4);
+        $this->getJson('/api/v1/admin/network/genealogy?q='.$child->uuid)
+            ->assertOk()->assertJsonPath('data.0.email', $child->email);
         $invalid = app(NetworkBranchMoveService::class)->preview($b->uuid, $child->uuid, $root->id);
         $this->assertFalse($invalid['valid']);
     }
