@@ -29,14 +29,14 @@ class NetworkGenealogyController extends Controller
             $query->where(fn ($q) => $q->where('name', 'like', '%'.$input['q'].'%')
                 ->orWhere('uuid', 'like', '%'.$input['q'].'%'));
         }
-        $page = $query->paginate($input['perPage'] ?? 50, ['id', 'uuid', 'name', 'is_admin']);
+        $page = $query->paginate($input['perPage'] ?? 50, ['id', 'uuid', 'name', 'email', 'is_admin']);
         $sponsors = $this->tree->sponsorCodes($page->getCollection()->pluck('uuid')->all());
         $packageNames = User::packageNamesFor($page->getCollection());
         $activity = app(ActivationService::class)->activityForUsers($page->getCollection());
         $page->through(function (User $user) use ($snapshot, $sponsors, $packageNames, $activity) {
             $node = $snapshot['nodes'][strtoupper($user->uuid)] ?? null;
             return [
-                'uuid' => $user->uuid, 'name' => $user->name,
+                'uuid' => $user->uuid, 'name' => $user->name, 'email' => $user->email,
                 'active' => $activity[$user->id], 'package_name' => $packageNames[$user->id],
                 'sponsor_code' => $sponsors->get(strtoupper($user->uuid)),
                 'level' => $node['level'] ?? null, 'connected' => $node !== null,
