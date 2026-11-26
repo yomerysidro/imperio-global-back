@@ -3,18 +3,23 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\BaseController;
-use App\Models\PaymentOrderPoint;
 use App\Models\Range;
 use App\Models\User;
 use App\Services\Core\ActivationService;
 use App\Services\Core\MembershipRankService;
+use App\Services\Core\RangeQualificationService;
 use Carbon\CarbonImmutable;
 use Illuminate\Http\Request;
 use Illuminate\Support\Str;
 
 class RankProgressController extends BaseController
 {
-    public function show(Request $request, MembershipRankService $membershipRanks, ActivationService $activation)
+    public function show(
+        Request $request,
+        MembershipRankService $membershipRanks,
+        ActivationService $activation,
+        RangeQualificationService $rangeQualification,
+    )
     {
         $input = $request->validate(['member_id' => ['nullable', 'integer', 'min:1']]);
         $user = $request->user();
@@ -24,12 +29,8 @@ class RankProgressController extends BaseController
         }
         $now = CarbonImmutable::now('America/Lima');
         [$from, $to] = $activation->visiblePeriod($now);
-        $user->load('range.range');
-        $current = $user->range?->range;
-        $points = (float) PaymentOrderPoint::where('user_code', $user->uuid)
-            ->whereIn('type', [PaymentOrderPoint::COMPRA, PaymentOrderPoint::GRUPAL])
-            ->when(!$activation->isMonthlyGracePeriod($now), fn ($query) => $query->where('state', true))
-            ->whereBetween('created_at', [$from, $to])->sum('point');
+        $points = $rangeQualification->volumeFor($user, $from, $to, $activation->isMonthlyGracePeriod($now));
+        $current = $rangeQualification->qualifiedRuleFor($user, $points)?->range;
         $ranks = Range::with('file', 'rule.requirements.requiredRange')
             ->where('state', true)->orderBy('order')->get()->map(fn (Range $rank) => [
                 'id' => $rank->id, 'title' => $rank->title, 'position' => $rank->order,
