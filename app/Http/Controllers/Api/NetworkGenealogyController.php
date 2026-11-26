@@ -182,6 +182,7 @@ class NetworkGenealogyController extends Controller
                 'user' => [
                     'uuid' => $node['user_code'],
                     'name' => $node['user_name'],
+                    'email' => $profile?->email,
                     'registered_at' => $profile?->created_at,
                     'active' => $profile?->active,
                     'package_name' => $profile?->package_name,
