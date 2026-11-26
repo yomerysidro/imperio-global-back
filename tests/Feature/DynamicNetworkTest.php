@@ -212,6 +212,8 @@ class DynamicNetworkTest extends TestCase
     {
         $root = $this->account('company'); $inactive = $this->account('inactive');
         $member = $this->account('buyer'); config(['mlm.root_uuid' => $root->uuid]);
+        config(['app.sponsorship_category_lock_from' => '2026-11-01']);
+        $this->travelTo(\Illuminate\Support\Carbon::parse('2026-11-25 12:00:00'));
         $affiliation = app(\App\Services\Core\AffiliationService::class);
         $affiliation->attach($inactive, $root->uuid, 'registration');
         $affiliation->attach($member, $inactive->uuid, 'registration');
@@ -223,14 +225,51 @@ class DynamicNetworkTest extends TestCase
             'pack_id' => $pack->id, 'sponsor_code' => $root->uuid, 'token' => 'fixture-'.\Illuminate\Support\Str::uuid()]);
         $commissions = app(\App\Services\Core\CommissionService::class);
         $commissions->confirmPoint($order, $member, $pack);
-        $this->assertDatabaseMissing('payment_order_points', ['payment_order_id' => $order->id,
-            'user_code' => $inactive->uuid, 'type' => 'P']);
+        $this->assertDatabaseHas('payment_order_points', ['payment_order_id' => $order->id,
+            'user_code' => $inactive->uuid, 'type' => 'P', 'point' => 4]);
         $this->assertDatabaseHas('payment_order_points', ['payment_order_id' => $order->id,
             'user_code' => $root->uuid, 'type' => 'P', 'level' => 2, 'point' => 2]);
         $before = DB::table('payment_order_points')->where('payment_order_id', $order->id)->orderBy('id')->get();
         app(NetworkBranchMoveService::class)->move($member->uuid, $root->uuid, $root->id);
         $commissions->confirmPoint($order, $member, $pack);
         $this->assertEquals($before, DB::table('payment_order_points')->where('payment_order_id', $order->id)->orderBy('id')->get());
+
+        $ledger = app(\App\Services\Core\FinancialLedgerService::class);
+        \App\Models\ActivationRule::create(['name' => 'Sponsorship fixture', 'minimum_points' => 40,
+            'minimum_amount' => 100, 'minimum_products' => 0, 'state' => true]);
+        $servicePack = \App\Models\Pack::create(['title' => 'Service fixture', 'price' => 100,
+            'points' => 40, 'category' => 'Servicio', 'state' => true, 'discount' => 0]);
+        $serviceMembership = \App\Models\PaymentOrder::create(['currency' => 'PEN', 'amount' => 100,
+            'pack_id' => $servicePack->id, 'sponsor_code' => $root->uuid]);
+        \App\Models\PaymentLog::create(['payment_order_id' => $serviceMembership->id,
+            'user_id' => $inactive->id, 'state' => \App\Models\PaymentLog::PAGADO, 'confirm' => true]);
+        $november = now()->startOfMonth();
+        $balance = $ledger->payoutSummary($november, $november->copy()->endOfMonth(), $inactive);
+        $this->assertSame(0.0, $balance['available']);
+        $this->assertSame(['generated' => 4.0, 'pending' => 4.0, 'total_commissions' => 4.0],
+            $balance['sponsorship_by_category']['product']);
+
+        $this->travelTo(\Illuminate\Support\Carbon::parse('2026-12-05 12:00:00'));
+        $membership = \App\Models\PaymentOrder::create(['currency' => 'PEN', 'amount' => 100,
+            'pack_id' => $pack->id, 'sponsor_code' => $root->uuid]);
+        \App\Models\PaymentLog::create(['payment_order_id' => $membership->id,
+            'user_id' => $inactive->id, 'state' => \App\Models\PaymentLog::PAGADO, 'confirm' => true]);
+        $december = now()->startOfMonth();
+        $balance = $ledger->payoutSummary($december, $december->copy()->endOfMonth(), $inactive);
+        $this->assertSame(4.0, $balance['available']);
+        $this->assertSame(['generated' => 4.0, 'pending' => 0.0, 'total_commissions' => 4.0],
+            $balance['sponsorship_by_category']['product']);
+        $this->assertSame(0.0, $ledger->payoutSummary($november, $november->copy()->endOfMonth(), $inactive)['available']);
+
+        foreach (['R' => 3, 'RS' => 2] as $type => $points) {
+            \App\Models\PaymentOrderPoint::create(['payment_order_id' => $membership->id,
+                'user_code' => $inactive->uuid, 'sponsor_code' => $root->uuid, 'user_id' => $inactive->id,
+                'type' => $type, 'point' => $points, 'state' => true, 'payment' => false]);
+        }
+        $balance = $ledger->payoutSummary($december, $december->copy()->endOfMonth(), $inactive);
+        $this->assertSame(7.0, $balance['sponsorship_by_category']['product']['total_commissions']);
+        $this->assertSame(2.0, $balance['sponsorship_by_category']['service']['total_commissions']);
+        $this->assertSame(9.0, $balance['available']);
     }
 
     public function test_invitation_cannot_replace_parent_and_cancellation_keeps_genealogy(): void
