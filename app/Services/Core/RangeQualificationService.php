@@ -78,6 +78,17 @@ class RangeQualificationService
         bool $isGracePeriod,
         ?array $descendantCodes = null,
     ): float {
+        return $this->volumeBreakdownFor($user, $from, $to, $isGracePeriod, $descendantCodes)['total'];
+    }
+
+    /** @return array{personal: float, network: float, total: float} */
+    public function volumeBreakdownFor(
+        User $user,
+        CarbonInterface $from,
+        CarbonInterface $to,
+        bool $isGracePeriod,
+        ?array $descendantCodes = null,
+    ): array {
         $points = PaymentOrderPoint::query()
             ->when(!$isGracePeriod, fn ($query) => $query->where('state', true))
             ->whereBetween('created_at', [$from, $to]);
@@ -87,11 +98,18 @@ class RangeQualificationService
                 ->where('type', PaymentOrderPoint::COMPRA)
                 ->selectRaw('MAX(point) AS points')->groupBy('payment_order_id');
 
-            return (float) DB::query()->fromSub($orders, 'network_purchases')->sum('points');
+            $network = (float) DB::query()->fromSub($orders, 'network_purchases')->sum('points');
+
+            return ['personal' => 0.0, 'network' => $network, 'total' => $network];
         }
 
-        return (float) $points->where('user_code', $user->uuid)
-            ->whereIn('type', [PaymentOrderPoint::COMPRA, PaymentOrderPoint::GRUPAL])->sum('point');
+        $byType = $points->where('user_code', $user->uuid)
+            ->whereIn('type', [PaymentOrderPoint::COMPRA, PaymentOrderPoint::GRUPAL])
+            ->selectRaw('type, SUM(point) AS points')->groupBy('type')->pluck('points', 'type');
+        $personal = (float) ($byType[PaymentOrderPoint::COMPRA] ?? 0);
+        $network = (float) ($byType[PaymentOrderPoint::GRUPAL] ?? 0);
+
+        return ['personal' => $personal, 'network' => $network, 'total' => $personal + $network];
     }
 
     public function qualifiedRuleFor(
