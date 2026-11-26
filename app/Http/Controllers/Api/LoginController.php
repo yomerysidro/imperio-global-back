@@ -97,6 +97,7 @@ class LoginController extends BaseController
             'dni'      => 'required|string|max:100',
             'password' => 'required|min:8',
             'sponsor_code' => 'required|string|exists:users,uuid',
+            'country' => 'nullable|string|max:255',
         ]);
 
         if ($validator->fails()) return $this->sendError('Error de validacion.', $validator->errors(), 422);
@@ -137,7 +138,8 @@ class LoginController extends BaseController
                 'name'     => $request->name,
                 'email'    => $request->email,
                 'uuid'     => trim($request->dni),
-                'password' => bcrypt($request->password)
+                'password' => bcrypt($request->password),
+                'country' => $validator->validated()['country'] ?? null,
             ]);
 
             $codeGenerator = new CodeGenerator();

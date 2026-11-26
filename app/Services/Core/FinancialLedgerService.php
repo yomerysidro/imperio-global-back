@@ -4,24 +4,44 @@ namespace App\Services\Core;
 
 use App\Models\PaymentOrderPoint;
 use App\Models\CollectionRequestPatrocinioUser;
+use App\Models\PaymentLog;
 use App\Models\User;
 use Carbon\CarbonInterface;
+use Illuminate\Support\Carbon;
 use Illuminate\Support\Collection;
 
 class FinancialLedgerService
 {
+    private const SPONSORSHIP_TYPES = ['P', 'PS', 'S'];
+
     public function movements(
         ?CarbonInterface $from = null,
         ?CarbonInterface $to = null,
         ?string $userCode = null,
         bool $includeClosed = false
-    ): Collection
+    ): Collection {
+        return $this->classifyMovements($from, $to, $userCode, $includeClosed)[0];
+    }
+
+    private function classifyMovements(
+        ?CarbonInterface $from,
+        ?CarbonInterface $to,
+        ?string $userCode,
+        bool $includeClosed
+    ): array
     {
+        $cutover = Carbon::parse(config('app.sponsorship_category_lock_from'));
         $query = PaymentOrderPoint::query()
             ->whereIn('type', ['P', 'PS', 'S', 'R', 'RS', 'I'])
             ->when(!$includeClosed, fn ($query) => $query->where('state', true))
             ->where('point', '>', 0);
-        if ($from && $to) $query->whereBetween('created_at', [$from, $to]);
+        if ($from && $to) {
+            $query->where('created_at', '<=', $to)->where(function ($query) use ($from, $cutover) {
+                $query->where('created_at', '>=', $from)
+                    ->orWhere(fn ($query) => $query->whereIn('type', self::SPONSORSHIP_TYPES)
+                        ->where('created_at', '>=', $cutover));
+            });
+        }
         if ($userCode) $query->whereRaw('UPPER(user_code) = ?', [strtoupper($userCode)]);
 
         $movements = $query->orderBy('id')->get()
@@ -31,20 +51,36 @@ class FinancialLedgerService
             ->map(fn (Collection $duplicates) => $duplicates->first())
             ->values();
 
-        if (!$from || !$to || $movements->isEmpty()) return $movements;
+        if (!$from || !$to || $movements->isEmpty()) return [$movements, collect()];
 
         $users = User::whereIn('uuid', $movements->pluck('user_code')->filter()->unique())
             ->get()->keyBy(fn (User $user) => strtoupper((string) $user->uuid));
         $activation = app(ActivationService::class);
         $isCurrentPeriod = $from->format('Y-m') === now()->format('Y-m');
+        $pending = collect();
+        $eligibility = [];
 
         // Una comision registrada solo es dinero pagable si su beneficiario
         // estuvo activo en el periodo. El paquete historico no habilita cobro.
-        return $movements->filter(function (PaymentOrderPoint $movement) use (
-            $users, $activation, $from, $to, $isCurrentPeriod
+        $payable = $movements->filter(function (PaymentOrderPoint $movement) use (
+            $users, $activation, $from, $to, $isCurrentPeriod, $cutover, $pending, &$eligibility
         ) {
             $user = $users->get(strtoupper((string) $movement->user_code));
             if (!$user) return false;
+            if (in_array($movement->type, self::SPONSORSHIP_TYPES, true)
+                && $movement->created_at->gte($cutover)) {
+                $category = $movement->type === PaymentOrderPoint::PATROCINIO ? 'product' : 'service';
+                $month = $movement->created_at->copy()->startOfMonth();
+                $lastMonth = $to->copy()->min(now())->startOfMonth();
+                while ($month <= $lastMonth) {
+                    $key = implode('|', [$user->id, $category, $month->format('Y-m')]);
+                    $eligible = $eligibility[$key] ??= $this->canCollectSponsorship($user, $category, $month);
+                    if ($eligible) return $month->isSameMonth($from);
+                    $month->addMonth();
+                }
+                $pending->push($movement);
+                return false;
+            }
             // La actividad se valida al generar el residual. Una comisión ya
             // ganada no desaparece del historial si el socio vence después.
             if (in_array($movement->type, [
@@ -58,6 +94,25 @@ class FinancialLedgerService
                 ? $activation->isActiveForCategoryPeriod($user, $category, $from, $to, !$isCurrentPeriod)
                 : $activation->isActiveForPeriod($user, $from, $to, !$isCurrentPeriod);
         })->values();
+        return [$payable, $pending];
+    }
+
+    private function canCollectSponsorship(User $user, string $category, CarbonInterface $month): bool
+    {
+        if ($user->is_admin || app(CorporateRootService::class)->isRootCode($user->uuid)) return true;
+
+        $end = $month->copy()->endOfMonth()->min(now());
+        $storedCategory = $category === 'product' ? 'Producto' : 'Servicio';
+        $ownsPack = PaymentLog::where('user_id', $user->id)
+            ->whereIn('state', [PaymentLog::PAGADO, PaymentLog::TERMINADO, PaymentLog::RESET])
+            ->where('created_at', '<=', $end)
+            ->whereHas('paymentOrder', fn ($query) => $query->where('amount', '>', 0)
+                ->whereHas('pack', fn ($query) => $query->where('category', $storedCategory)))
+            ->exists();
+
+        return $ownsPack && app(ActivationService::class)->isActiveForCategoryPeriod(
+            $user, $category, $month, $end, !$month->isSameMonth(now())
+        );
     }
 
     public function logicalCommissionKey(PaymentOrderPoint $row): string
@@ -153,17 +208,31 @@ class FinancialLedgerService
 
     public function payoutSummary(CarbonInterface $from, CarbonInterface $to, User $user): array
     {
-        $generated = (float) $this->summary($from, $to, $user->uuid)['bono_total'];
+        [$payable, $categoryPending] = $this->classifyMovements($from, $to, $user->uuid, false);
+        $generated = (float) $this->summarizeMovements($payable)['bono_total'];
         $requests = CollectionRequestPatrocinioUser::where('user_id', $user->id)
             ->whereDate('period', $from->copy()->startOfMonth()->toDateString());
         $pending = (float) (clone $requests)->where('state', CollectionRequestPatrocinioUser::PENDING)->sum('amount');
         $paid = (float) (clone $requests)->where('state', CollectionRequestPatrocinioUser::PAID)->sum('amount');
+        $sponsorship = [];
+        foreach (['product' => ['P'], 'service' => ['PS', 'S']] as $category => $types) {
+            $blocked = (float) $categoryPending->whereIn('type', $types)->sum('point');
+            $collectible = (float) $payable->whereIn('type', $types)->sum('point');
+            $residualType = $category === 'product' ? PaymentOrderPoint::RESIDUAL : PaymentOrderPoint::RESIDUAL_SERVICIO;
+            $residual = (float) $payable->where('type', $residualType)->sum('point');
+            $sponsorship[$category] = [
+                'generated' => round($collectible + $blocked, 2),
+                'pending' => round($blocked, 2),
+                'total_commissions' => round($collectible + $blocked + $residual, 2),
+            ];
+        }
 
         return [
             'generated' => round($generated, 2),
             'pending' => round($pending, 2),
             'paid' => round($paid, 2),
             'available' => round(max(0, $generated - $pending - $paid), 2),
+            'sponsorship_by_category' => $sponsorship,
             'last_paid_at' => (clone $requests)->where('state', CollectionRequestPatrocinioUser::PAID)->max('paid_at'),
         ];
     }

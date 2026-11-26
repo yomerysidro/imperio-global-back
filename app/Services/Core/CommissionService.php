@@ -10,7 +10,6 @@ use App\Models\SponsorshipPoint;
 use App\Models\ResidualPoint;
 use Illuminate\Support\Facades\Cache;
 use App\Models\SponsorRelation;
-use App\Models\PaymentProductOrder;
 use App\Models\CommissionRule;
 use App\Models\ManualReactivation;
 use Illuminate\Support\Facades\DB;
@@ -99,53 +98,6 @@ class CommissionService
             $visited[$normalizedSponsor] = true;
             $sponsorUser = User::where('uuid', $currentSponsorCode)->first();
             if (!$sponsorUser) break;
-            $isCompanySponsor = $sponsorUser->is_admin
-                || app(CorporateRootService::class)->isRootCode($sponsorUser->uuid);
-
-            $sponsorPack = null;
-
-            $sponsorLog = PaymentLog::where('user_id', $sponsorUser->id)
-                ->whereIn('state', [PaymentLog::PAGADO, PaymentLog::TERMINADO])
-                ->whereMonth('created_at', now()->month)
-                ->whereYear('created_at', now()->year)
-                ->orderBy('created_at', 'desc')
-                ->first();
-
-            if ($sponsorLog && $sponsorLog->payment_order_id) {
-                $sponsorOrder = PaymentOrder::with('pack')->find($sponsorLog->payment_order_id);
-                if ($sponsorOrder && $sponsorOrder->pack) {
-                    $sponsorPack = $sponsorOrder;
-                }
-            }
-
-            if (!$sponsorPack) {
-                $sponsorOwnPoint = PaymentOrderPoint::where('user_code', $currentSponsorCode)
-                    ->where('type', PaymentOrderPoint::COMPRA)
-                    ->where('state', true)
-                    ->whereMonth('created_at', now()->month)
-                    ->whereYear('created_at', now()->year)
-                    ->with('paymentOrder.pack')
-                    ->first();
-
-                if ($sponsorOwnPoint && $sponsorOwnPoint->paymentOrder && $sponsorOwnPoint->paymentOrder->pack) {
-                    $sponsorPack = $sponsorOwnPoint->paymentOrder;
-                }
-            }
-
-            if (!$sponsorPack) {
-                $productOrder = PaymentProductOrder::where('user_id', $sponsorUser->id)
-                    ->whereIn('state', [PaymentProductOrder::PAGADO, PaymentProductOrder::ENVIADO, PaymentProductOrder::TERMINADO])
-                    ->whereMonth('created_at', now()->month)
-                    ->whereYear('created_at', now()->year)
-                    ->with('pack')
-                    ->orderByDesc('created_at')
-                    ->first();
-
-                if ($productOrder && $productOrder->pack) {
-                    $sponsorPack = $productOrder;
-                }
-            }
-
             $superiorSponsorCode = $this->networkTreeService->sponsorCode($currentSponsorCode, true) ?? '';
 
             $existingGrupal = PaymentOrderPoint::where('payment_order_id', $paymentOrder->id)
@@ -167,10 +119,7 @@ class CommissionService
                 ]);
             }
 
-            if ($debeGenerarBono && (
-                $isCompanySponsor
-                || ($sponsorPack && app(ActivationService::class)->isActive($sponsorUser))
-            )) {
+            if ($debeGenerarBono) {
                 // El porcentaje corresponde al paquete que originó la afiliación,
                 // no al paquete personal del beneficiario.
                 if ($sponsorshipConfig) {

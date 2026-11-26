@@ -19,6 +19,7 @@ use App\Http\Controllers\Api\Services\ServiceOrderController;
 use App\Http\Controllers\Api\MlmRuleController;
 use App\Http\Controllers\Api\NetworkBranchMoveController;
 use App\Http\Controllers\Api\NetworkGenealogyController;
+use App\Http\Controllers\Api\RankProgressController;
 
 Route::prefix('v1')->group(function () {
 
@@ -48,6 +49,8 @@ Route::prefix('v1')->group(function () {
 
     // --- GRUPO PROTEGIDO ---
     Route::middleware('auth:api')->group(function () {
+        Route::get('rank-progress', [RankProgressController::class, 'show']);
+        Route::get('rank-progress/members', [RankProgressController::class, 'members']);
 
         Route::prefix('admin/network/moves')->group(function () {
             Route::get('status', [NetworkBranchMoveController::class, 'status']);

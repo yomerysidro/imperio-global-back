@@ -53,6 +53,7 @@ return [
     */
 
     'url' => env('APP_URL', 'http://localhost'),
+    'frontend_url' => env('APP_URL_FRONT', 'https://imperioglobal.org'),
 
     /*
     |--------------------------------------------------------------------------
@@ -66,6 +67,8 @@ return [
     */
 
     'timezone' => env('APP_TIMEZONE', 'UTC'),
+
+    'sponsorship_category_lock_from' => env('SPONSORSHIP_CATEGORY_LOCK_FROM', '2026-11-25'),
 
     /*
     |--------------------------------------------------------------------------

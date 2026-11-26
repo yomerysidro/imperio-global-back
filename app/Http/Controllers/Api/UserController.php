@@ -535,6 +535,8 @@ class UserController extends BaseController
             ? max(0, (float) $nextRange->points - (float) $totalPoints)
             : 0;
 
+        $responsePayload['gender'] = $userModel->genger;
+
         return $this->sendResponse((object)$responsePayload, 'Perfil sincronizado');
     } catch (Exception $e) {
         return $this->sendError("Fallo de integridad: " . $e->getMessage());
@@ -543,28 +545,22 @@ class UserController extends BaseController
 
     public function authUpdate(Request $request)
     {
-        $validator = Validator::make($request->all(), []);
+        $profile = $request->validate([
+            'address' => ['nullable', 'string', 'max:2000'],
+            'phone' => ['nullable', 'string', 'max:255'],
+            'city' => ['nullable', 'string', 'max:255'],
+            'country' => ['nullable', 'string', 'max:255'],
+            'gender' => ['nullable', 'string', 'in:M,F'],
+        ]);
 
-        if ($validator->fails()) return $this->sendError('Error de validacion.', $validator->errors(), 422);
-
-        try {
-            DB::beginTransaction();
-            $this->networkTreeService->lockRootForMutation();
-            $dataBody = (object) $request->all();
-            $user_id  = Auth::id();
-            User::where("id", $user_id)->update([
-                "address" => $dataBody->address,
-                "phone"   => $dataBody->phone,
-                'city'    => $dataBody->city,
-                'country' => $dataBody->country,
-                'gender'  => $dataBody->gender,
-            ]);
-
-            DB::commit();
-            return $this->sendResponse(true, 'User');
-        } catch (Exception $e) {
-            return $this->sendError($e->getMessage());
+        if (array_key_exists('gender', $profile)) {
+            $profile['genger'] = $profile['gender'];
+            unset($profile['gender']);
         }
+
+        User::whereKey($request->user()->id)->update($profile);
+
+        return $this->sendResponse(true, 'Perfil actualizado.');
     }
 
     public function authUpdateAvatar(Request $request)
@@ -1256,6 +1252,8 @@ class UserController extends BaseController
 
     public function createUser(Request $request)
     {
+        $location = $request->validate(['country' => 'nullable|string|max:255']);
+
         try {
             DB::beginTransaction();
             $dataBody = (object) $request->all();
@@ -1295,7 +1293,8 @@ class UserController extends BaseController
                 'name'     => $dataBody->name,
                 'email'    => $dataBody->email,
                 'uuid'     => trim($dataBody->dni),
-                'password' => bcrypt($dataBody->password)
+                'password' => bcrypt($dataBody->password),
+                'country' => $location['country'] ?? null,
             ]);
 
             app(\App\Services\Core\AffiliationService::class)->attach($userCreated, $sponsor->uuid, 'admin_registration');
@@ -1399,16 +1398,14 @@ class UserController extends BaseController
     public function invitedLinkEmail(Request $request)
     {
         $validator = Validator::make($request->all(), [
-            'users'        => 'required|array',
-            'users.*.code' => 'required|exists:users,uuid',
+            'users'        => 'required|array|min:1',
+            'users.*.code' => 'required|distinct|exists:users,uuid',
         ]);
 
         if ($validator->fails()) return $this->sendError('Error de validacion.', $validator->errors(), 422);
 
         try {
             $userId = Auth::id();
-            DB::beginTransaction();
-            $dateNow   = Carbon::now();
             $userModel = User::with(['paymentActive'])->find($userId);
             $dataBody  = (object) $request->all();
             $token     = (string) Str::uuid();
@@ -1419,11 +1416,14 @@ class UserController extends BaseController
                 'token'             => $token,
                 'state'             => true,
                 'type'              => InviteUser::EMAIL,
-                'expired_time'      => $dateNow->addHours(2),
+                'expired_time'      => now()->addHours(2),
             ]);
 
-            InviteUser::where('expired_time', '<', $dateNow)->update(["state" => false]);
-            $url = env('APP_URL_FRONT') . '/guest/' . $token;
+            $origin = $request->headers->get('Origin');
+            $frontend = in_array($origin, config('cors.allowed_origins', []), true)
+                ? $origin
+                : config('app.frontend_url');
+            $url = rtrim($frontend, '/') . '/guest/' . $token;
 
             foreach ($dataBody->users as $key => $user) {
                 $user        = (object) $user;
@@ -1436,11 +1436,10 @@ class UserController extends BaseController
                 Mail::to($userInvited->email)->send(new InivitedSponsorUser($mailData));
             }
 
-            DB::commit();
             return $this->sendResponse(1, '');
         } catch (Exception $e) {
-            DB::rollBack();
-            return $this->sendError($e->getMessage(), [], 402);
+            report($e);
+            return $this->sendError('No se pudieron enviar todas las invitaciones.', [], 502);
         }
     }
 
@@ -1460,7 +1459,7 @@ class UserController extends BaseController
 
             if ($inviteUser        == null) return $this->sendResponse("", "No existe el codigo de invitación.", false);
             if ($inviteUser->state == false) return $this->sendResponse("", "El codigo de invitación esta desabilitado.", false);
-            if ($inviteUser->expired_time < $dateNow) return $this->sendResponse("", "El codigo de invitación ha expirado.", false);
+            if (Carbon::parse($inviteUser->expired_time)->lte($dateNow)) return $this->sendResponse("", "El codigo de invitación ha expirado.", false);
 
             $sponsor = User::where('uuid', $inviteUser->sponsor_user_code)->first();
             if (!$sponsor || !$this->networkTreeService->belongsToNetwork(
@@ -1502,7 +1501,7 @@ class UserController extends BaseController
 
             if ($inviteUser        == null) { DB::rollBack(); return $this->sendResponse("", "No existe el codigo de invitación.", false); }
             if ($inviteUser->state == false) { DB::rollBack(); return $this->sendResponse("", "El codigo de invitación esta desabilitado.", false); }
-            if ($inviteUser->expired_time < $dateNow) { DB::rollBack(); return $this->sendResponse("", "El codigo de invitación ha expirado.", false); }
+            if (Carbon::parse($inviteUser->expired_time)->lte($dateNow)) { DB::rollBack(); return $this->sendResponse("", "El codigo de invitación ha expirado.", false); }
 
             GuestsTokenUser::create([
                 'sponsor_user_code' => $inviteUser->sponsor_user_code,
