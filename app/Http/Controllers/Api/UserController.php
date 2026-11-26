@@ -393,9 +393,11 @@ class UserController extends BaseController
         }
 
         // 🔥 CORRECCIÓN 4: TOTAL DE PUNTOS PARA RANGO = COMPRA + GRUPAL + RESIDUAL
-        // El volumen para rango contiene solamente puntos de compra y de red.
-        // Las comisiones son dinero y nunca incrementan el volumen grupal.
-        $totalPoints = $puntosPersonales + $puntosRed;
+        $rangeQualification = app(RangeQualificationService::class);
+        [$rankFrom, $rankTo] = app(ActivationService::class)->visiblePeriod($now);
+        $isCorporateRoot = app(\App\Services\Core\CorporateRootService::class)->isRootCode($userModel->uuid);
+        $descendantCodes = $isCorporateRoot ? $this->networkTreeService->descendantCodes($userModel->uuid) : null;
+        $totalPoints = $rangeQualification->volumeFor($userModel, $rankFrom, $rankTo, $isGracePeriod, $descendantCodes);
         $totalComisiones = $gananciaPatrocinio + $puntosResiduales + $puntosInfinito;
 
         // Las invitaciones antiguas no representan socios activos ni deben
@@ -403,26 +405,15 @@ class UserController extends BaseController
         $legacyTokens = collect();
 
         // 🔥 CORRECCIÓN 5: LÓGICA PARA la raíz corporativa (CORPORATIVO)
-        $descendantCodes = null;
-        if (app(\App\Services\Core\CorporateRootService::class)->isRootCode($userModel->uuid)) {
-            $descendantCodes = $this->networkTreeService->descendantCodes($userModel->uuid);
-
-            $monthlyGroupVolume = DB::query()->fromSub(
-                PaymentOrderPoint::select('payment_order_id', DB::raw('MAX(point) as point'))
-                    ->whereIn('user_code', $descendantCodes)
-                    ->when(!$isGracePeriod, fn ($query) => $query->where('state', true))
-                    ->where('type', PaymentOrderPoint::COMPRA)
-                    ->whereMonth('created_at', $mesFiltro)
-                    ->whereYear('created_at', $anioFiltro)
-                    ->groupBy('payment_order_id'),
-                'monthly_network_purchases'
-            )->sum('point');
+        if ($isCorporateRoot) {
+            $monthlyGroupVolume = $totalPoints;
+            $puntosPersonales = 0;
+            $puntosRed = $monthlyGroupVolume;
 
             // Se conserva la clave por compatibilidad con el frontend, pero
             // nunca se mezcla el acumulado historico con el periodo actual.
             $userModel->volumen_grupal_historico = (float) $monthlyGroupVolume;
             $userModel->volumen_grupal_mensual = (float) $monthlyGroupVolume;
-            $totalPoints = (float) $monthlyGroupVolume;
 
             $userModel->points = (object) [
                 'patrocinio'         => (float) $gananciaPatrocinio,
@@ -483,7 +474,7 @@ class UserController extends BaseController
         $userModel->totalPoints = $totalPoints;
 
         // Sincronizar el rango con el mismo volumen B + G que muestra el perfil.
-        app(RangeQualificationService::class)->recalculateUser($userModel, isActive: $isActive);
+        $rangeQualification->recalculateUser($userModel, isActive: $isActive, volume: $totalPoints);
         $userModel->load('range.range.rule');
         $rangeCurrent = $userModel->range?->range;
         $nextRange = Range::with('rule')->where('state', true)

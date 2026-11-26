@@ -8,6 +8,7 @@ use App\Models\RangeUser;
 use App\Models\User;
 use App\Models\PaymentLog;
 use App\Models\PaymentProductOrderPoint;
+use Carbon\CarbonInterface;
 use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\DB;
 
@@ -39,6 +40,10 @@ class RangeQualificationService
             ->when(!$isGracePeriod, fn ($query) => $query->where('state', true))
             ->whereBetween('created_at', [$from, $to])
             ->selectRaw('user_code, SUM(point) total')->groupBy('user_code')->pluck('total', 'user_code');
+        $root = $users->first(fn (User $user) => strcasecmp($user->uuid, $rootUuid) === 0);
+        if ($root) {
+            $groupPoints[$root->uuid] = $this->volumeFor($root, $from, $to, $isGracePeriod);
+        }
         foreach ($users as $user) {
             $key = strtoupper($user->uuid);
             $this->activeCache[$key] = app(ActivationService::class)->isActive($user);
@@ -66,23 +71,61 @@ class RangeQualificationService
             ->where('state', true)->get()->sortBy('range.order')->values();
     }
 
-    public function recalculateUser(User $user, ?Collection $rules = null, ?bool $isActive = null): ?RangeUser
+    public function volumeFor(
+        User $user,
+        CarbonInterface $from,
+        CarbonInterface $to,
+        bool $isGracePeriod,
+        ?array $descendantCodes = null,
+    ): float {
+        $points = PaymentOrderPoint::query()
+            ->when(!$isGracePeriod, fn ($query) => $query->where('state', true))
+            ->whereBetween('created_at', [$from, $to]);
+
+        if (app(CorporateRootService::class)->isRootCode($user->uuid)) {
+            $orders = $points->whereIn('user_code', $descendantCodes ?? $this->network->descendantCodes($user->uuid))
+                ->where('type', PaymentOrderPoint::COMPRA)
+                ->selectRaw('MAX(point) AS points')->groupBy('payment_order_id');
+
+            return (float) DB::query()->fromSub($orders, 'network_purchases')->sum('points');
+        }
+
+        return (float) $points->where('user_code', $user->uuid)
+            ->whereIn('type', [PaymentOrderPoint::COMPRA, PaymentOrderPoint::GRUPAL])->sum('point');
+    }
+
+    public function qualifiedRuleFor(
+        User $user,
+        float $volume,
+        ?Collection $rules = null,
+        ?bool $isActive = null,
+    ): ?RangeRule
     {
         ActivationService::clearCache();
         $activation = app(ActivationService::class);
         $key = strtoupper($user->uuid);
         $this->activeCache[$key] = $isActive ?? $activation->isActive($user);
         $this->rankActiveCache[$key] = $activation->hasRankActivity($user, $this->activeCache[$key]);
-        [$from, $to] = $activation->visiblePeriod();
-        $isGracePeriod = $activation->isMonthlyGracePeriod();
-        $points = (float) PaymentOrderPoint::where('user_code', $user->uuid)
-            ->whereIn('type', [PaymentOrderPoint::COMPRA, PaymentOrderPoint::GRUPAL])
-            ->when(!$isGracePeriod, fn ($query) => $query->where('state', true))
-            ->whereBetween('created_at', [$from, $to])->sum('point');
         $qualifiedRule = null;
         foreach ($rules ?? $this->activeRules() as $rule) {
-            if ($this->qualifies($user, $rule, $points)) $qualifiedRule = $rule;
+            if ($this->qualifies($user, $rule, $volume)) $qualifiedRule = $rule;
         }
+        return $qualifiedRule;
+    }
+
+    public function recalculateUser(
+        User $user,
+        ?Collection $rules = null,
+        ?bool $isActive = null,
+        ?float $volume = null,
+    ): ?RangeUser
+    {
+        if ($volume === null) {
+            $activation = app(ActivationService::class);
+            [$from, $to] = $activation->visiblePeriod();
+            $volume = $this->volumeFor($user, $from, $to, $activation->isMonthlyGracePeriod());
+        }
+        $qualifiedRule = $this->qualifiedRuleFor($user, $volume, $rules, $isActive);
 
         if (!$qualifiedRule) {
             RangeUser::where('user_id', $user->id)->update(['status' => false]);

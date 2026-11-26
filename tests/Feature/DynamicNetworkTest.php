@@ -208,6 +208,38 @@ class DynamicNetworkTest extends TestCase
             'sponsor_code' => $root->uuid, 'type' => 'B', 'point' => 40]);
     }
 
+    public function test_corporate_rank_uses_the_same_unique_network_purchases_as_dashboard(): void
+    {
+        $root = $this->account('company');
+        $buyer = $this->account('volume-buyer');
+        config(['mlm.root_uuid' => $root->uuid]);
+        $this->travelTo(\Illuminate\Support\Carbon::parse('2026-11-25 12:00:00', 'America/Lima'));
+        app(\App\Services\Core\AffiliationService::class)->attach($buyer, $root->uuid, 'registration');
+
+        $pack = \App\Models\Pack::create(['title' => 'Network volume fixture', 'price' => 100,
+            'points' => 995, 'category' => 'Producto', 'state' => true, 'discount' => 0]);
+        $order = \App\Models\PaymentOrder::create(['currency' => 'PEN', 'amount' => 100,
+            'pack_id' => $pack->id, 'sponsor_code' => $root->uuid, 'token' => 'fixture-'.\Illuminate\Support\Str::uuid()]);
+        foreach ([[$buyer, 'B', 995], [$buyer, 'B', 995], [$root, 'G', 1005], [$root, 'P', 50]] as [$user, $type, $points]) {
+            \App\Models\PaymentOrderPoint::create(['payment_order_id' => $order->id,
+                'user_code' => $user->uuid, 'sponsor_code' => $root->uuid, 'user_id' => $user->id,
+                'type' => $type, 'point' => $points, 'state' => true, 'payment' => false]);
+        }
+
+        $bronce = \App\Models\Range::create(['title' => 'Bronce fixture', 'points' => 1000,
+            'childs' => 0, 'order' => 99, 'state' => true]);
+        $rule = new \App\Models\RangeRule(['range_id' => $bronce->id, 'required_points' => 1000]);
+        \App\Models\RangeUser::create(['user_id' => $root->id, 'range_id' => $bronce->id, 'status' => true]);
+
+        $engine = app(\App\Services\Core\RangeQualificationService::class);
+        [$from, $to] = app(\App\Services\Core\ActivationService::class)->visiblePeriod();
+        $volume = $engine->volumeFor($root, $from, $to, false);
+        $this->assertSame(995.0, $volume);
+        $this->assertNull($engine->qualifiedRuleFor($root, $volume, collect([$rule])));
+        $this->assertNull($engine->recalculateUser($root, collect([$rule])));
+        $this->assertNull($root->range()->first());
+    }
+
     public function test_new_commission_uses_current_eligible_chain_and_retry_preserves_distribution(): void
     {
         $root = $this->account('company'); $inactive = $this->account('inactive');
